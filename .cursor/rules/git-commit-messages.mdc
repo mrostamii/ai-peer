@@ -1,0 +1,86 @@
+---
+description: Use Conventional Commits for all git commit messages (release-please)
+alwaysApply: true
+---
+
+# Git Commit Messages
+
+Use the [Conventional Commits](https://www.conventionalcommits.org/) specification for every commit message in this project.
+
+## Format
+
+```
+<type>[optional scope]!: <description>
+
+[optional body]
+
+[optional footer(s)]
+```
+
+- **Type** and **description** are required. **Scope** is optional (`feat(gateway): ...`).
+- Append **`!`** before the colon for a breaking change without a footer (e.g. `feat(api)!: remove legacy endpoint`).
+- **Description**: imperative mood, lowercase, no trailing period, ~50 characters or less when practical (e.g. “add” not “added”, “fix” not “fixed”).
+- **Body**: what and why, wrapped at ~72 characters per line; separate from the title with a blank line.
+- **Footers**: token/value pairs (e.g. `Reviewed-by:`, `Refs: #123`). **`BREAKING CHANGE:`** (or `BREAKING-CHANGE:`) must describe the migration impact for consumers.
+
+## Types
+
+| Type | Use for |
+|------|---------|
+| `feat` | User-visible behavior or capability (MINOR in SemVer) |
+| `fix` | Bug fix (PATCH) |
+| `perf` | Performance improvement (often PATCH; same release signal as `fix` in release-please) |
+| `refactor` | Internal change, same external behavior |
+| `test` | Tests only |
+| `build` | Build system, dependencies, packaging |
+| `ci` | CI configuration or scripts |
+| `docs` | Documentation only |
+| `chore` | Maintenance that does not fit elsewhere (no user-facing feature/fix) |
+| `style` | Formatting, whitespace (no logic change) |
+
+Breaking changes: **`feat!:`**, **`fix!:`**, **`refactor!:`**, etc., or a **`BREAKING CHANGE:`** footer (MAJOR).
+
+## Release automation (release-please)
+
+Commit types drive [release-please](https://github.com/googleapis/release-please) release PRs:
+
+- **`feat:`** → **minor** (e.g. 0.6.0 → 0.7.0)
+- **`fix:`** / **`perf:`** → **patch** (e.g. 0.6.0 → 0.6.1)
+- **`feat!:`** / **`fix!:`** / footer **`BREAKING CHANGE:`** → **major** (e.g. 0.6.0 → 1.0.0)
+- **`chore:`**, **`docs:`**, **`ci:`**, **`refactor:`**, **`test:`**, etc. → appear in the changelog when included in the release batch but **do not bump version by themselves**
+
+Pick the type so the next release version matches user impact. Prefer **`fix`** over **`chore`** when correcting broken behavior.
+
+## Rules
+
+1. First line: `<type>(scope): description` — scope is optional but recommended when touching a clear area (`gateway`, `node`, `ci`, `deps`).
+2. One logical change per commit when possible; split unrelated edits.
+3. Do not bury breaking changes: use `!` or **`BREAKING CHANGE:`** in the footer with migration notes.
+4. **`revert:`** is allowed for reverts; body should reference the reverted commit SHA when helpful.
+
+## Examples
+
+```
+feat(node): advertise models in DHT provider record
+```
+
+```
+fix(gateway): retry inference on transient stream errors
+```
+
+```
+docs: add Phase 0 spike notes to README
+```
+
+```
+ci: run go vet and tests on windows matrix
+```
+
+```
+feat(api)!: drop v1alpha inference payload shape
+
+BREAKING CHANGE: InferenceRequest field `payload` is renamed to `body`;
+clients must update JSON before upgrading.
+```
+
+When suggesting or writing commit messages, always follow this format and release-please implications above.
