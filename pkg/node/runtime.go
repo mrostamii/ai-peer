@@ -62,6 +62,8 @@ func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 		libp2p.EnableRelay(),
 		libp2p.EnableHolePunching(),
 		libp2p.NATPortMap(),
+		libp2p.EnableNATService(),
+		libp2p.EnableAutoNATv2(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create libp2p host: %w", err)

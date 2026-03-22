@@ -100,6 +100,9 @@ cmd/ai-peer/          # main binary entrypoint (expanded in Phase 1)
 cmd/spike-libp2p/     # Phase 0.2 libp2p + DHT spike
 cmd/spike-ollama/     # Phase 0.2 Ollama API client spike
 cmd/spike-openai-proxy/ # Phase 0.2 OpenAI-compatible → Ollama proxy spike
+proto/                # coordination .proto (v0.1)
+pkg/apiv1/            # generated protobuf Go types
+pkg/registry/         # in-memory node registry (gateway / routing)
 pkg/                  # shared libraries
 contracts/            # Solidity / deployment artifacts (Phase 2+)
 docs/                 # additional documentation
@@ -119,6 +122,15 @@ go build -o ai-peer ./cmd/ai-peer
 
 ```bash
 go test ./...
+```
+
+### Regenerate protobuf (coordination messages)
+
+Requires `protoc` and `protoc-gen-go` on `PATH`:
+
+```bash
+go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+go generate ./pkg/apiv1/...
 ```
 
 ## License
