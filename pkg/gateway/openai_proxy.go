@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mrostamii/ai-peer/pkg/apiv1"
 	"github.com/mrostamii/ai-peer/pkg/registry"
 )
 
@@ -20,6 +21,7 @@ type OpenAIProxy struct {
 	ollamaBase string
 	reg        *registry.Registry
 	remoteChat RemoteChatFunc
+	remoteStreamChat RemoteStreamChatFunc
 }
 
 type RemoteChatMessage struct {
@@ -40,6 +42,7 @@ type RemoteChatResponse struct {
 }
 
 type RemoteChatFunc func(context.Context, string, *RemoteChatRequest) (*RemoteChatResponse, error)
+type RemoteStreamChatFunc func(context.Context, string, *RemoteChatRequest) (io.ReadCloser, error)
 
 // NewOpenAIProxy serves OpenAI-shaped HTTP. If reg is non-nil, GET /v1/network/nodes
 // returns peers learned from gossip health messages.
@@ -53,6 +56,10 @@ func NewOpenAIProxy(listenAddr, ollamaBase string, reg *registry.Registry) *Open
 
 func (p *OpenAIProxy) SetRemoteChatFunc(fn RemoteChatFunc) {
 	p.remoteChat = fn
+}
+
+func (p *OpenAIProxy) SetRemoteStreamChatFunc(fn RemoteStreamChatFunc) {
+	p.remoteStreamChat = fn
 }
 
 func (p *OpenAIProxy) Run(ctx context.Context) error {
@@ -266,6 +273,98 @@ func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 }
 
 func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http.Request, oreq *openAIChatRequest) {
+	if p.reg != nil && p.remoteStreamChat != nil {
+		nodes := p.reg.NodesForModel(oreq.Model)
+		for _, node := range nodes {
+			rc, err := p.remoteStreamChat(r.Context(), node.NodeID, &RemoteChatRequest{
+				Model:       oreq.Model,
+				Temperature: oreq.Temperature,
+				Messages: func() []RemoteChatMessage {
+					out := make([]RemoteChatMessage, 0, len(oreq.Messages))
+					for _, m := range oreq.Messages {
+						out = append(out, RemoteChatMessage{Role: m.Role, Content: m.Content})
+					}
+					return out
+				}(),
+			})
+			if err != nil {
+				continue
+			}
+			defer rc.Close()
+
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				_ = writeJSON(w, http.StatusInternalServerError, openAIError(http.StatusInternalServerError, "streaming not supported by server writer"))
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Connection", "keep-alive")
+			w.WriteHeader(http.StatusOK)
+
+			chatID := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
+			created := time.Now().Unix()
+			model := oreq.Model
+			dec := json.NewDecoder(bufio.NewReader(rc))
+			firstChunk := true
+			for {
+				var chunk apiv1.InferenceStreamChunk
+				if err := dec.Decode(&chunk); err != nil {
+					if err == io.EOF {
+						break
+					}
+					return
+				}
+				if !chunk.GetOk() {
+					return
+				}
+				if model == "" && chunk.GetModel() != "" {
+					model = chunk.GetModel()
+				}
+				delta := map[string]any{}
+				if firstChunk {
+					delta["role"] = "assistant"
+				}
+				if c := chunk.GetContent(); c != "" {
+					delta["content"] = c
+				}
+				finishReason := any(nil)
+				if chunk.GetDone() {
+					finishReason = "stop"
+				}
+				firstChunk = false
+
+				event := map[string]any{
+					"id":      chatID,
+					"object":  "chat.completion.chunk",
+					"created": created,
+					"model":   model,
+					"choices": []map[string]any{
+						{
+							"index":         0,
+							"delta":         delta,
+							"finish_reason": finishReason,
+						},
+					},
+				}
+				chunkRaw, err := json.Marshal(event)
+				if err != nil {
+					return
+				}
+				if _, err := fmt.Fprintf(w, "data: %s\n\n", chunkRaw); err != nil {
+					return
+				}
+				flusher.Flush()
+				if chunk.GetDone() {
+					break
+				}
+			}
+			_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+			flusher.Flush()
+			return
+		}
+	}
+
 	body := toOllamaChatBody(oreq)
 	raw, err := json.Marshal(body)
 	if err != nil {

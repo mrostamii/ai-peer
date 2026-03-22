@@ -203,3 +203,55 @@ func (m *InferenceResponse) GetErrorMessage() string {
 	}
 	return m.ErrorMessage
 }
+
+// InferenceStreamChunk is one streamed response fragment for remote inference.
+type InferenceStreamChunk struct {
+	RequestId    string
+	Model        string
+	Content      string
+	Done         bool
+	Ok           bool
+	ErrorMessage string
+}
+
+func (m *InferenceStreamChunk) GetRequestId() string {
+	if m == nil {
+		return ""
+	}
+	return m.RequestId
+}
+
+func (m *InferenceStreamChunk) GetModel() string {
+	if m == nil {
+		return ""
+	}
+	return m.Model
+}
+
+func (m *InferenceStreamChunk) GetContent() string {
+	if m == nil {
+		return ""
+	}
+	return m.Content
+}
+
+func (m *InferenceStreamChunk) GetDone() bool {
+	if m == nil {
+		return false
+	}
+	return m.Done
+}
+
+func (m *InferenceStreamChunk) GetOk() bool {
+	if m == nil {
+		return false
+	}
+	return m.Ok
+}
+
+func (m *InferenceStreamChunk) GetErrorMessage() string {
+	if m == nil {
+		return ""
+	}
+	return m.ErrorMessage
+}

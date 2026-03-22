@@ -186,3 +186,52 @@ func TestHandleChatCompletionsUsesRemoteNode(t *testing.T) {
 		t.Fatalf("expected remote response body, got: %s", string(body))
 	}
 }
+
+func TestHandleChatCompletionsStreamUsesRemoteNode(t *testing.T) {
+	t.Parallel()
+	reg := registry.New(time.Minute)
+	now := time.Now().UnixMilli()
+	_ = reg.ApplyHealthJSON([]byte(fmt.Sprintf(`{"node_id":"peer-remote","uptime_sec":1,"timestamp_ms":%d}`, now)))
+	_ = reg.ApplyNodeAnnounceProto(&apiv1.NodeAnnounce{
+		NodeId:      "peer-remote",
+		Models:      []string{"llama3.2:latest"},
+		TimestampMs: now,
+	})
+	p := NewOpenAIProxy("127.0.0.1:0", "http://127.0.0.1:1", reg)
+	p.SetRemoteStreamChatFunc(func(_ context.Context, nodeID string, req *RemoteChatRequest) (io.ReadCloser, error) {
+		if nodeID != "peer-remote" {
+			t.Fatalf("nodeID=%q want peer-remote", nodeID)
+		}
+		if req.Model != "llama3.2:latest" || len(req.Messages) != 1 || req.Messages[0].Content != "hello" {
+			t.Fatalf("unexpected remote req: %+v", req)
+		}
+		raw := `{"model":"llama3.2:latest","content":"from-remote","done":false,"ok":true}` + "\n" +
+			`{"model":"llama3.2:latest","done":true,"ok":true}` + "\n"
+		return io.NopCloser(strings.NewReader(raw)), nil
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"llama3.2:latest",
+		"messages":[{"role":"user","content":"hello"}],
+		"stream":true
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	p.handleChatCompletions(rr, req)
+	res := rr.Result()
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", res.StatusCode)
+	}
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(body)
+	if !strings.Contains(s, "from-remote") {
+		t.Fatalf("expected remote stream content, got: %s", s)
+	}
+	if !strings.Contains(s, "data: [DONE]") {
+		t.Fatalf("expected [DONE] marker, got: %s", s)
+	}
+}

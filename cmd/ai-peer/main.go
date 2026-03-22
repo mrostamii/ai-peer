@@ -6,6 +6,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -297,6 +298,7 @@ func runGatewayStart(args []string) {
 		resolvedListen, resolvedOllama, cfg.Listen.TCPPort, cfg.Listen.QUICPort, node.HealthTopicID)
 	proxy := gateway.NewOpenAIProxy(resolvedListen, resolvedOllama, reg)
 	proxy.SetRemoteChatFunc(buildRemoteChatFunc(rt, cfg))
+	proxy.SetRemoteStreamChatFunc(buildRemoteStreamChatFunc(rt, cfg))
 	if err := proxy.Run(ctx); err != nil && err != context.Canceled {
 		log.Fatalf("gateway failed: %v", err)
 	}
@@ -366,6 +368,79 @@ func buildRemoteChatFunc(rt *node.Runtime, cfg *config.Config) gateway.RemoteCha
 			Content:          out.GetContent(),
 			CompletionTokens: out.GetTokensUsed(),
 		}, nil
+	}
+}
+
+type readCloserWithCancel struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (r *readCloserWithCancel) Close() error {
+	r.cancel()
+	return r.ReadCloser.Close()
+}
+
+func buildRemoteStreamChatFunc(rt *node.Runtime, cfg *config.Config) gateway.RemoteStreamChatFunc {
+	return func(ctx context.Context, nodeID string, req *gateway.RemoteChatRequest) (io.ReadCloser, error) {
+		if req == nil {
+			return nil, fmt.Errorf("remote chat request is nil")
+		}
+		targetID, err := peer.Decode(nodeID)
+		if err != nil {
+			return nil, fmt.Errorf("decode target peer id: %w", err)
+		}
+		wireReq := &apiv1.InferenceRequest{
+			RequestId: fmt.Sprintf("req-%d", time.Now().UnixNano()),
+			Model:     req.Model,
+			Messages:  make([]*apiv1.ChatMessage, 0, len(req.Messages)),
+			Params:    map[string]string{},
+		}
+		for _, m := range req.Messages {
+			wireReq.Messages = append(wireReq.Messages, &apiv1.ChatMessage{
+				Role:    m.Role,
+				Content: m.Content,
+			})
+		}
+		if req.Temperature != nil {
+			wireReq.Params["temperature"] = fmt.Sprintf("%g", *req.Temperature)
+		}
+
+		streamCtx, cancelStream := context.WithTimeout(ctx, time.Duration(cfg.Timeouts.TotalRequestSec)*time.Second)
+		rc, err := rt.InferRemoteStream(streamCtx, targetID, wireReq)
+		if err == nil {
+			return &readCloserWithCancel{ReadCloser: rc, cancel: cancelStream}, nil
+		}
+		cancelStream()
+
+		providers, findErr := rt.FindModelProviders(ctx, req.Model, 32)
+		if findErr != nil {
+			return nil, fmt.Errorf("remote stream failed (%v); find model providers: %w", err, findErr)
+		}
+		var target *peer.AddrInfo
+		for i := range providers {
+			if providers[i].ID == targetID {
+				target = &providers[i]
+				break
+			}
+		}
+		if target == nil {
+			return nil, fmt.Errorf("target provider %s unavailable for model %q", nodeID, req.Model)
+		}
+		dialCtx, cancelDial := context.WithTimeout(ctx, 5*time.Second)
+		if err := rt.ConnectPeer(dialCtx, *target); err != nil {
+			cancelDial()
+			return nil, fmt.Errorf("connect target provider: %w", err)
+		}
+		cancelDial()
+
+		retryCtx, cancelRetry := context.WithTimeout(ctx, time.Duration(cfg.Timeouts.TotalRequestSec)*time.Second)
+		retryRC, err := rt.InferRemoteStream(retryCtx, targetID, wireReq)
+		if err != nil {
+			cancelRetry()
+			return nil, fmt.Errorf("remote stream retry failed: %w", err)
+		}
+		return &readCloserWithCancel{ReadCloser: retryRC, cancel: cancelRetry}, nil
 	}
 }
 
