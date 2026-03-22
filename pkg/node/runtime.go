@@ -56,7 +56,7 @@ func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 		dhtMode = dht.ModeClient
 	}
 
-	h, err := libp2p.New(
+	opts := []libp2p.Option{
 		libp2p.ListenAddrStrings(listenTCP, listenQUIC),
 		libp2p.Security(noise.ID, noise.New),
 		libp2p.ResourceManager(&network.NullResourceManager{}),
@@ -65,7 +65,16 @@ func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 		libp2p.NATPortMap(),
 		libp2p.EnableNATService(),
 		libp2p.EnableAutoNATv2(),
-	)
+	}
+	if cfg.Node.IdentityKeyFile != "" {
+		key, err := loadOrCreateIdentity(cfg.Node.IdentityKeyFile)
+		if err != nil {
+			return nil, err
+		}
+		opts = append(opts, libp2p.Identity(key))
+	}
+
+	h, err := libp2p.New(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("create libp2p host: %w", err)
 	}
