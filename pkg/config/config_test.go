@@ -40,6 +40,9 @@ models:
 	if cfg.Heartbeat.IntervalSec != 30 || cfg.Timeouts.FirstTokenSec != 30 || cfg.Timeouts.TotalRequestSec != 120 {
 		t.Fatalf("defaults not applied: heartbeat=%d first=%d total=%d", cfg.Heartbeat.IntervalSec, cfg.Timeouts.FirstTokenSec, cfg.Timeouts.TotalRequestSec)
 	}
+	if cfg.Gateway.Listen != "127.0.0.1:8080" {
+		t.Fatalf("gateway default not applied: %q", cfg.Gateway.Listen)
+	}
 }
 
 func TestLoadInvalidConfig(t *testing.T) {
@@ -102,5 +105,33 @@ models:
 	}
 	if !strings.Contains(err.Error(), "field unknown_field not found") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadAllowsEmptyBootstrapPeers(t *testing.T) {
+	t.Parallel()
+	d := t.TempDir()
+	p := filepath.Join(d, "empty-bootstrap.yaml")
+	err := os.WriteFile(p, []byte(`node:
+  name: "x"
+listen:
+  tcp_port: 4001
+  quic_port: 4001
+network:
+  bootstrap_peers: []
+backend:
+  type: "ollama"
+  base_url: "http://127.0.0.1:11434"
+models:
+  advertised:
+    - "llama3.2:latest"
+`), 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Load(p)
+	if err != nil {
+		t.Fatalf("expected empty bootstrap peers to be allowed, got: %v", err)
 	}
 }

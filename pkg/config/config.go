@@ -13,6 +13,7 @@ const (
 	defaultHeartbeatIntervalSec = 30
 	defaultFirstTokenSec        = 30
 	defaultTotalRequestSec      = 120
+	defaultGatewayListenAddr    = "127.0.0.1:8080"
 )
 
 type Config struct {
@@ -51,6 +52,10 @@ type Config struct {
 		Enabled bool   `yaml:"enabled"`
 		Listen  string `yaml:"listen"`
 	} `yaml:"metrics"`
+
+	Gateway struct {
+		Listen string `yaml:"listen"`
+	} `yaml:"gateway"`
 }
 
 func Load(path string) (*Config, error) {
@@ -83,6 +88,9 @@ func (c *Config) applyDefaults() {
 	if c.Timeouts.TotalRequestSec == 0 {
 		c.Timeouts.TotalRequestSec = defaultTotalRequestSec
 	}
+	if c.Gateway.Listen == "" {
+		c.Gateway.Listen = defaultGatewayListenAddr
+	}
 }
 
 func (c *Config) Validate() error {
@@ -94,9 +102,6 @@ func (c *Config) Validate() error {
 	}
 	if err := validatePort("listen.quic_port", c.Listen.QUICPort); err != nil {
 		return err
-	}
-	if len(c.Network.BootstrapPeers) == 0 {
-		return fmt.Errorf("network.bootstrap_peers must contain at least one multiaddr")
 	}
 	if c.Backend.Type != "ollama" {
 		return fmt.Errorf("backend.type must be \"ollama\" for v0.1")
@@ -115,6 +120,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Timeouts.TotalRequestSec <= 0 {
 		return fmt.Errorf("timeouts.total_request_sec must be > 0")
+	}
+	if c.Gateway.Listen == "" {
+		return fmt.Errorf("gateway.listen must not be empty")
 	}
 	return nil
 }

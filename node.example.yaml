@@ -6,8 +6,7 @@ listen:
   quic_port: 4001
 
 network:
-  bootstrap_peers:
-    - "/ip4/51.195.145.102/tcp/4001/p2p/12D3KooExamplePeerId"
+  bootstrap_peers: []
 
 backend:
   type: "ollama"
@@ -27,3 +26,6 @@ timeouts:
 metrics:
   enabled: true
   listen: "127.0.0.1:9090"
+
+gateway:
+  listen: "127.0.0.1:8080"

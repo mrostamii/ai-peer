@@ -14,6 +14,8 @@ import (
 
 	"github.com/mrostamii/ai-peer/pkg/backend/ollama"
 	"github.com/mrostamii/ai-peer/pkg/config"
+	"github.com/mrostamii/ai-peer/pkg/gateway"
+	"github.com/mrostamii/ai-peer/pkg/node"
 )
 
 func main() {
@@ -28,6 +30,8 @@ func main() {
 		runConfigCheck(os.Args[2:])
 	case "node":
 		runNode(os.Args[2:])
+	case "gateway":
+		runGateway(os.Args[2:])
 	default:
 		fmt.Printf("unknown command: %s\n", os.Args[1])
 		os.Exit(2)
@@ -101,7 +105,17 @@ func runNodeStart(args []string) {
 			log.Printf("warning: advertised model %q not found in backend /api/tags", want)
 		}
 	}
-	log.Printf("node is ready; press Ctrl+C to stop")
+	rt, err := node.Start(ctx, cfg)
+	if err != nil {
+		log.Fatalf("node runtime failed to start: %v", err)
+	}
+	defer func() {
+		if err := rt.Close(); err != nil {
+			log.Printf("node shutdown warning: %v", err)
+		}
+	}()
+
+	log.Printf("node is ready (libp2p + dht + backend); press Ctrl+C to stop")
 
 	<-ctx.Done()
 	log.Printf("shutdown signal received; exiting")
@@ -128,4 +142,50 @@ func runNodeStatus(args []string) {
 	fmt.Printf("backend=%s\n", cfg.Backend.BaseURL)
 	fmt.Printf("health=%s\n", health)
 	fmt.Printf("advertised_models=%v\n", cfg.Models.Advertised)
+}
+
+func runGateway(args []string) {
+	if len(args) == 0 {
+		fmt.Println("usage: ai-peer gateway start [-file ./node.yaml] [-listen 127.0.0.1:8080] [-ollama http://127.0.0.1:11434]")
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "start":
+		runGatewayStart(args[1:])
+	default:
+		fmt.Printf("unknown gateway command: %s\n", args[0])
+		os.Exit(2)
+	}
+}
+
+func runGatewayStart(args []string) {
+	fs := flag.NewFlagSet("gateway start", flag.ExitOnError)
+	file := fs.String("file", "./node.yaml", "path to node.yaml")
+	listen := fs.String("listen", "", "gateway listen address override")
+	ollamaBase := fs.String("ollama", "", "ollama base URL override (optional)")
+	_ = fs.Parse(args)
+
+	cfg, err := config.Load(*file)
+	if err != nil {
+		log.Fatalf("config invalid: %v", err)
+	}
+
+	resolvedListen := cfg.Gateway.Listen
+	if *listen != "" {
+		resolvedListen = *listen
+	}
+	resolvedOllama := cfg.Backend.BaseURL
+	if *ollamaBase != "" {
+		resolvedOllama = *ollamaBase
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	log.Printf("gateway start: listen=%s ollama=%s", resolvedListen, resolvedOllama)
+	proxy := gateway.NewOpenAIProxy(resolvedListen, resolvedOllama)
+	if err := proxy.Run(ctx); err != nil && err != context.Canceled {
+		log.Fatalf("gateway failed: %v", err)
+	}
+	log.Printf("gateway stopped")
 }
