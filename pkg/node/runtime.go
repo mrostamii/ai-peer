@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"strings"
 	"time"
 
 	libp2p "github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
+	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -26,6 +28,8 @@ type Runtime struct {
 	dht        *dht.IpfsDHT
 	bootstraps []peer.AddrInfo
 	reconnect  bool
+	startedAt  time.Time
+	metricsSrv *http.Server
 }
 
 func Start(ctx context.Context, cfg *config.Config) (*Runtime, error) {
@@ -77,6 +81,7 @@ func Start(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 		dht:        kdht,
 		bootstraps: bootstraps,
 		reconnect:  useCustomBootstraps,
+		startedAt:  time.Now(),
 	}
 	r.logDialAddrs()
 	if r.reconnect {
@@ -84,6 +89,22 @@ func Start(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 	} else {
 		log.Printf("default DHT bootstrap mode: reconnect loop disabled")
 	}
+	if cfg.Metrics.Enabled {
+		r.metricsSrv = startMetricsServer(ctx, cfg.Metrics.Listen)
+	}
+	hw := DetectHardware()
+	go r.advertiseCapabilitiesLoop(ctx, cfg.Models.Advertised, hw, "0")
+	ps, err := pubsub.NewGossipSub(ctx, h)
+	if err != nil {
+		log.Printf("health heartbeat disabled: init gossipsub failed: %v", err)
+		return r, nil
+	}
+	healthTopic, err := ps.Join(healthTopicID)
+	if err != nil {
+		log.Printf("health heartbeat disabled: join topic %q failed: %v", healthTopicID, err)
+		return r, nil
+	}
+	go r.healthHeartbeatLoop(ctx, time.Duration(cfg.Heartbeat.IntervalSec)*time.Second, &gossipsubPublisher{topic: healthTopic})
 	return r, nil
 }
 
@@ -92,6 +113,11 @@ func (r *Runtime) Close() error {
 	if r.dht != nil {
 		if err := r.dht.Close(); err != nil {
 			errs = append(errs, "dht close: "+err.Error())
+		}
+	}
+	if r.metricsSrv != nil {
+		if err := stopMetricsServer(r.metricsSrv); err != nil {
+			errs = append(errs, err.Error())
 		}
 	}
 	if r.host != nil {

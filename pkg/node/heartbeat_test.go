@@ -1,0 +1,56 @@
+package node
+
+import (
+	"context"
+	"encoding/json"
+	"testing"
+	"time"
+)
+
+type mockPublisher struct {
+	payloads [][]byte
+}
+
+func (m *mockPublisher) Publish(_ context.Context, data []byte) error {
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	m.payloads = append(m.payloads, cp)
+	return nil
+}
+
+func TestBuildHealthUpdate(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1710000000, 0)
+	started := now.Add(-75 * time.Second)
+	msg, err := buildHealthUpdate("peer-1", started, now)
+	if err != nil {
+		t.Fatalf("buildHealthUpdate() error = %v", err)
+	}
+
+	var out HealthUpdate
+	if err := json.Unmarshal(msg, &out); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if out.NodeID != "peer-1" {
+		t.Fatalf("unexpected node id: %q", out.NodeID)
+	}
+	if out.UptimeSec != 75 {
+		t.Fatalf("unexpected uptime sec: %d", out.UptimeSec)
+	}
+	if out.Load != 0 || out.LatencyMs != 0 {
+		t.Fatalf("expected default load/latency to be 0, got load=%f latency=%d", out.Load, out.LatencyMs)
+	}
+}
+
+func TestPublishHealthUpdate(t *testing.T) {
+	t.Parallel()
+	pub := &mockPublisher{}
+	now := time.Unix(1710000000, 0)
+	started := now.Add(-10 * time.Second)
+	if err := publishHealthUpdate(context.Background(), pub, "peer-1", started, now); err != nil {
+		t.Fatalf("publishHealthUpdate() error = %v", err)
+	}
+	if len(pub.payloads) != 1 {
+		t.Fatalf("expected 1 payload, got %d", len(pub.payloads))
+	}
+}

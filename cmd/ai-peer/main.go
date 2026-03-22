@@ -99,6 +99,8 @@ func runNodeStart(args []string) {
 	}
 
 	log.Printf("node start: name=%s tcp=%d quic=%d backend=%s", cfg.Node.Name, cfg.Listen.TCPPort, cfg.Listen.QUICPort, cfg.Backend.BaseURL)
+	hw := node.DetectHardware()
+	log.Printf("hardware: os=%s arch=%s gpu=%s ram_bytes=%d vram_bytes=%d", hw.OS, hw.Arch, hw.GPU, hw.RAMBytes, hw.VRAMBytes)
 	log.Printf("backend models: %v", available)
 	for _, want := range cfg.Models.Advertised {
 		if !slices.Contains(available, want) {
@@ -142,6 +144,12 @@ func runNodeStatus(args []string) {
 	fmt.Printf("backend=%s\n", cfg.Backend.BaseURL)
 	fmt.Printf("health=%s\n", health)
 	fmt.Printf("advertised_models=%v\n", cfg.Models.Advertised)
+	hw := node.DetectHardware()
+	fmt.Printf("os=%s\n", hw.OS)
+	fmt.Printf("arch=%s\n", hw.Arch)
+	fmt.Printf("gpu=%s\n", hw.GPU)
+	fmt.Printf("ram_bytes=%d\n", hw.RAMBytes)
+	fmt.Printf("vram_bytes=%d\n", hw.VRAMBytes)
 }
 
 func runGateway(args []string) {
