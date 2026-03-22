@@ -9,11 +9,13 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sort"
 	"slices"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/mrostamii/ai-peer/pkg/apiv1"
 	"github.com/mrostamii/ai-peer/pkg/backend/ollama"
 	"github.com/mrostamii/ai-peer/pkg/config"
 	"github.com/mrostamii/ai-peer/pkg/gateway"
@@ -245,6 +247,50 @@ func runGatewayStart(args []string) {
 			}
 		}
 	}()
+	modelSyncEvery := hb
+	if modelSyncEvery < 10*time.Second {
+		modelSyncEvery = 10 * time.Second
+	}
+	go func() {
+		syncOnce := func() {
+			queryCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+			defer cancel()
+
+			avail, err := rt.ListModelAvailability(queryCtx, cfg.Models.Advertised, 32)
+			if err != nil {
+				log.Printf("network registry: model sync failed: %v", err)
+				return
+			}
+			knownList := reg.List()
+			known := make(map[string]struct{}, len(knownList))
+			for _, rec := range knownList {
+				known[rec.NodeID] = struct{}{}
+			}
+			modelMap := buildKnownNodeModelMap(avail, known)
+			nowMS := time.Now().UnixMilli()
+			for nodeID, models := range modelMap {
+				if err := reg.ApplyNodeAnnounceProto(&apiv1.NodeAnnounce{
+					NodeId:      nodeID,
+					Models:      models,
+					TimestampMs: nowMS,
+				}); err != nil {
+					log.Printf("network registry: model merge failed for %s: %v", nodeID, err)
+				}
+			}
+		}
+
+		syncOnce()
+		t := time.NewTicker(modelSyncEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				syncOnce()
+			}
+		}
+	}()
 
 	log.Printf("gateway start: listen=%s ollama=%s p2p=tcp/%d quic/%d (health topic %q)",
 		resolvedListen, resolvedOllama, cfg.Listen.TCPPort, cfg.Listen.QUICPort, node.HealthTopicID)
@@ -253,6 +299,40 @@ func runGatewayStart(args []string) {
 		log.Fatalf("gateway failed: %v", err)
 	}
 	log.Printf("gateway stopped")
+}
+
+func buildKnownNodeModelMap(avail []node.ModelAvailability, known map[string]struct{}) map[string][]string {
+	modelSetByNode := make(map[string]map[string]struct{})
+	for _, entry := range avail {
+		model := strings.TrimSpace(entry.Model)
+		if model == "" {
+			continue
+		}
+		for _, provider := range entry.Providers {
+			nodeID := provider.ID.String()
+			if nodeID == "" {
+				continue
+			}
+			if _, ok := known[nodeID]; !ok {
+				continue
+			}
+			if _, ok := modelSetByNode[nodeID]; !ok {
+				modelSetByNode[nodeID] = map[string]struct{}{}
+			}
+			modelSetByNode[nodeID][model] = struct{}{}
+		}
+	}
+
+	out := make(map[string][]string, len(modelSetByNode))
+	for nodeID, set := range modelSetByNode {
+		models := make([]string, 0, len(set))
+		for model := range set {
+			models = append(models, model)
+		}
+		sort.Strings(models)
+		out[nodeID] = models
+	}
+	return out
 }
 
 func runNetwork(args []string) {
