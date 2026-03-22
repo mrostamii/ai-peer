@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,7 +19,27 @@ type OpenAIProxy struct {
 	listenAddr string
 	ollamaBase string
 	reg        *registry.Registry
+	remoteChat RemoteChatFunc
 }
+
+type RemoteChatMessage struct {
+	Role    string
+	Content string
+}
+
+type RemoteChatRequest struct {
+	Model       string
+	Messages    []RemoteChatMessage
+	Temperature *float64
+}
+
+type RemoteChatResponse struct {
+	Model            string
+	Content          string
+	CompletionTokens int64
+}
+
+type RemoteChatFunc func(context.Context, string, *RemoteChatRequest) (*RemoteChatResponse, error)
 
 // NewOpenAIProxy serves OpenAI-shaped HTTP. If reg is non-nil, GET /v1/network/nodes
 // returns peers learned from gossip health messages.
@@ -28,6 +49,10 @@ func NewOpenAIProxy(listenAddr, ollamaBase string, reg *registry.Registry) *Open
 		ollamaBase: strings.TrimRight(ollamaBase, "/"),
 		reg:        reg,
 	}
+}
+
+func (p *OpenAIProxy) SetRemoteChatFunc(fn RemoteChatFunc) {
+	p.remoteChat = fn
 }
 
 func (p *OpenAIProxy) Run(ctx context.Context) error {
@@ -111,12 +136,38 @@ func (p *OpenAIProxy) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data := make([]map[string]any, 0, len(tags.Models))
+	seen := map[string]struct{}{}
 	for _, m := range tags.Models {
 		id := m.Name
 		if id == "" {
 			id = m.Model
 		}
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		seen[id] = struct{}{}
+	}
+	if p.reg != nil {
+		for _, rec := range p.reg.List() {
+			for _, model := range rec.Models {
+				model = strings.TrimSpace(model)
+				if model == "" {
+					continue
+				}
+				seen[model] = struct{}{}
+			}
+		}
+	}
+
+	ids := make([]string, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	data := make([]map[string]any, 0, len(ids))
+	for _, id := range ids {
 		data = append(data, map[string]any{
 			"id":       id,
 			"object":   "model",
@@ -148,6 +199,30 @@ func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 	if oreq.Stream {
 		p.handleChatCompletionsStream(w, r, &oreq)
 		return
+	}
+	if p.reg != nil && p.remoteChat != nil {
+		nodes := p.reg.NodesForModel(oreq.Model)
+		if len(nodes) > 0 {
+			remoteReq := &RemoteChatRequest{
+				Model:       oreq.Model,
+				Messages:    make([]RemoteChatMessage, 0, len(oreq.Messages)),
+				Temperature: oreq.Temperature,
+			}
+			for _, msg := range oreq.Messages {
+				remoteReq.Messages = append(remoteReq.Messages, RemoteChatMessage{
+					Role:    msg.Role,
+					Content: msg.Content,
+				})
+			}
+			for _, node := range nodes {
+				resp, err := p.remoteChat(r.Context(), node.NodeID, remoteReq)
+				if err != nil {
+					continue
+				}
+				_ = writeJSON(w, http.StatusOK, openAIChatCompletionFromRemote(resp, oreq.Model))
+				return
+			}
+		}
 	}
 
 	body := toOllamaChatBody(&oreq)
@@ -352,6 +427,37 @@ func openAIChatCompletionFromOllama(ollama *ollamaChatResponse, requestedModel s
 			"prompt_tokens":     ollama.PromptEvalCount,
 			"completion_tokens": ollama.EvalCount,
 			"total_tokens":      ollama.PromptEvalCount + ollama.EvalCount,
+		},
+	}
+}
+
+func openAIChatCompletionFromRemote(remote *RemoteChatResponse, requestedModel string) map[string]any {
+	model := requestedModel
+	if model == "" && remote != nil {
+		model = remote.Model
+	}
+	content := ""
+	tokens := int64(0)
+	if remote != nil {
+		content = remote.Content
+		tokens = remote.CompletionTokens
+	}
+	return map[string]any{
+		"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+		"object":  "chat.completion",
+		"created": time.Now().Unix(),
+		"model":   model,
+		"choices": []map[string]any{
+			{
+				"index":         0,
+				"message":       map[string]string{"role": "assistant", "content": content},
+				"finish_reason": "stop",
+			},
+		},
+		"usage": map[string]int64{
+			"prompt_tokens":     0,
+			"completion_tokens": tokens,
+			"total_tokens":      tokens,
 		},
 	}
 }

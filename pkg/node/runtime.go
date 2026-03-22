@@ -18,6 +18,7 @@ import (
 	noise "github.com/libp2p/go-libp2p/p2p/security/noise"
 	ma "github.com/multiformats/go-multiaddr"
 
+	"github.com/mrostamii/ai-peer/pkg/backend/ollama"
 	"github.com/mrostamii/ai-peer/pkg/config"
 )
 
@@ -117,6 +118,7 @@ func Start(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 	}
 	hw := DetectHardware()
 	go r.advertiseCapabilitiesLoop(ctx, cfg.Models.Advertised, hw, "0")
+	r.registerInferenceHandler(ollama.New(cfg.Backend.BaseURL))
 	ps, err := pubsub.NewGossipSub(ctx, r.host)
 	if err != nil {
 		log.Printf("health heartbeat disabled: init gossipsub failed: %v", err)

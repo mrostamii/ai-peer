@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/mrostamii/ai-peer/pkg/apiv1"
 	"github.com/mrostamii/ai-peer/pkg/backend/ollama"
 	"github.com/mrostamii/ai-peer/pkg/config"
@@ -295,10 +296,77 @@ func runGatewayStart(args []string) {
 	log.Printf("gateway start: listen=%s ollama=%s p2p=tcp/%d quic/%d (health topic %q)",
 		resolvedListen, resolvedOllama, cfg.Listen.TCPPort, cfg.Listen.QUICPort, node.HealthTopicID)
 	proxy := gateway.NewOpenAIProxy(resolvedListen, resolvedOllama, reg)
+	proxy.SetRemoteChatFunc(buildRemoteChatFunc(rt, cfg))
 	if err := proxy.Run(ctx); err != nil && err != context.Canceled {
 		log.Fatalf("gateway failed: %v", err)
 	}
 	log.Printf("gateway stopped")
+}
+
+func buildRemoteChatFunc(rt *node.Runtime, cfg *config.Config) gateway.RemoteChatFunc {
+	return func(ctx context.Context, nodeID string, req *gateway.RemoteChatRequest) (*gateway.RemoteChatResponse, error) {
+		if req == nil {
+			return nil, fmt.Errorf("remote chat request is nil")
+		}
+		targetID, err := peer.Decode(nodeID)
+		if err != nil {
+			return nil, fmt.Errorf("decode target peer id: %w", err)
+		}
+		wireReq := &apiv1.InferenceRequest{
+			RequestId: fmt.Sprintf("req-%d", time.Now().UnixNano()),
+			Model:     req.Model,
+			Messages:  make([]*apiv1.ChatMessage, 0, len(req.Messages)),
+			Params:    map[string]string{},
+		}
+		for _, m := range req.Messages {
+			wireReq.Messages = append(wireReq.Messages, &apiv1.ChatMessage{
+				Role:    m.Role,
+				Content: m.Content,
+			})
+		}
+		if req.Temperature != nil {
+			wireReq.Params["temperature"] = fmt.Sprintf("%g", *req.Temperature)
+		}
+
+		// Fast path: try direct stream first to avoid per-request DHT lookups.
+		inferCtx, cancelInfer := context.WithTimeout(ctx, time.Duration(cfg.Timeouts.TotalRequestSec)*time.Second)
+		out, err := rt.InferRemote(inferCtx, targetID, wireReq)
+		cancelInfer()
+		if err != nil {
+			// Fallback: resolve peer addrs via DHT, connect, then retry once.
+			providers, findErr := rt.FindModelProviders(ctx, req.Model, 32)
+			if findErr != nil {
+				return nil, fmt.Errorf("remote inference failed (%v); find model providers: %w", err, findErr)
+			}
+			var target *peer.AddrInfo
+			for i := range providers {
+				if providers[i].ID == targetID {
+					target = &providers[i]
+					break
+				}
+			}
+			if target == nil {
+				return nil, fmt.Errorf("target provider %s unavailable for model %q", nodeID, req.Model)
+			}
+			dialCtx, cancelDial := context.WithTimeout(ctx, 5*time.Second)
+			if err := rt.ConnectPeer(dialCtx, *target); err != nil {
+				cancelDial()
+				return nil, fmt.Errorf("connect target provider: %w", err)
+			}
+			cancelDial()
+			retryCtx, cancelRetry := context.WithTimeout(ctx, time.Duration(cfg.Timeouts.TotalRequestSec)*time.Second)
+			out, err = rt.InferRemote(retryCtx, targetID, wireReq)
+			cancelRetry()
+			if err != nil {
+				return nil, fmt.Errorf("remote inference retry failed: %w", err)
+			}
+		}
+		return &gateway.RemoteChatResponse{
+			Model:            req.Model,
+			Content:          out.GetContent(),
+			CompletionTokens: out.GetTokensUsed(),
+		}, nil
+	}
 }
 
 func buildKnownNodeModelMap(avail []node.ModelAvailability, known map[string]struct{}) map[string][]string {
