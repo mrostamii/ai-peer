@@ -17,6 +17,8 @@ import (
 const (
 	modelKeyPrefix      = "ai-peer/v0.1/model/"
 	capabilityKeyPrefix = "ai-peer/v0.1/capability/"
+	startupAdvertiseAttempts = 6
+	startupAdvertiseDelay    = 5 * time.Second
 )
 
 type providerRouter interface {
@@ -101,7 +103,10 @@ func advertiseCapabilities(ctx context.Context, router providerRouter, models []
 }
 
 func (r *Runtime) advertiseCapabilitiesLoop(ctx context.Context, models []string, hw HardwareInfo, pricePer1K string) {
-	if err := advertiseCapabilities(ctx, r.dht, models, hw, pricePer1K); err != nil {
+	runOnce := func() error {
+		return advertiseCapabilities(ctx, r.dht, models, hw, pricePer1K)
+	}
+	if err := advertiseWithRetries(ctx, runOnce, startupAdvertiseAttempts, startupAdvertiseDelay, time.Sleep); err != nil {
 		logDiscoveryError(err)
 	}
 
@@ -112,11 +117,40 @@ func (r *Runtime) advertiseCapabilitiesLoop(ctx context.Context, models []string
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if err := advertiseCapabilities(ctx, r.dht, models, hw, pricePer1K); err != nil {
+			if err := runOnce(); err != nil {
 				logDiscoveryError(err)
 			}
 		}
 	}
+}
+
+func advertiseWithRetries(ctx context.Context, advertise func() error, attempts int, delay time.Duration, sleepFn func(time.Duration)) error {
+	if attempts <= 0 {
+		attempts = 1
+	}
+	if delay < 0 {
+		delay = 0
+	}
+	if sleepFn == nil {
+		sleepFn = time.Sleep
+	}
+
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err := advertise(); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		if i == attempts-1 || delay == 0 {
+			continue
+		}
+		sleepFn(delay)
+	}
+	return lastErr
 }
 
 func logDiscoveryError(err error) {

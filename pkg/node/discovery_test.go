@@ -2,7 +2,9 @@ package node
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/ipfs/go-cid"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -104,5 +106,45 @@ func TestListModelAvailabilityDedupesModels(t *testing.T) {
 	}
 	if got[0].Model != "llama3.2:latest" || got[0].ProviderCount != 1 {
 		t.Fatalf("unexpected availability: %+v", got[0])
+	}
+}
+
+func TestAdvertiseWithRetriesSucceedsAfterTransientFailures(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	attempts := 0
+	sleeps := 0
+	err := advertiseWithRetries(ctx, func() error {
+		attempts++
+		if attempts < 3 {
+			return errors.New("transient")
+		}
+		return nil
+	}, 5, time.Second, func(time.Duration) { sleeps++ })
+	if err != nil {
+		t.Fatalf("advertiseWithRetries() error = %v", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("attempts=%d want 3", attempts)
+	}
+	if sleeps != 2 {
+		t.Fatalf("sleeps=%d want 2", sleeps)
+	}
+}
+
+func TestAdvertiseWithRetriesReturnsLastError(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	attempts := 0
+	want := errors.New("still failing")
+	err := advertiseWithRetries(ctx, func() error {
+		attempts++
+		return want
+	}, 2, time.Second, func(time.Duration) {})
+	if !errors.Is(err, want) {
+		t.Fatalf("advertiseWithRetries() error = %v want %v", err, want)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts=%d want 2", attempts)
 	}
 }
