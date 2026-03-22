@@ -10,15 +10,24 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/mrostamii/ai-peer/pkg/registry"
 )
 
 type OpenAIProxy struct {
 	listenAddr string
 	ollamaBase string
+	reg        *registry.Registry
 }
 
-func NewOpenAIProxy(listenAddr, ollamaBase string) *OpenAIProxy {
-	return &OpenAIProxy{listenAddr: listenAddr, ollamaBase: strings.TrimRight(ollamaBase, "/")}
+// NewOpenAIProxy serves OpenAI-shaped HTTP. If reg is non-nil, GET /v1/network/nodes
+// returns peers learned from gossip health messages.
+func NewOpenAIProxy(listenAddr, ollamaBase string, reg *registry.Registry) *OpenAIProxy {
+	return &OpenAIProxy{
+		listenAddr: listenAddr,
+		ollamaBase: strings.TrimRight(ollamaBase, "/"),
+		reg:        reg,
+	}
 }
 
 func (p *OpenAIProxy) Run(ctx context.Context) error {
@@ -29,6 +38,9 @@ func (p *OpenAIProxy) Run(ctx context.Context) error {
 	})
 	mux.HandleFunc("GET /v1/models", p.handleModels)
 	mux.HandleFunc("POST /v1/chat/completions", p.handleChatCompletions)
+	if p.reg != nil {
+		mux.HandleFunc("GET /v1/network/nodes", p.handleNetworkNodes)
+	}
 
 	srv := &http.Server{
 		Addr:              p.listenAddr,
@@ -51,6 +63,18 @@ func (p *OpenAIProxy) Run(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	}
+}
+
+func (p *OpenAIProxy) handleNetworkNodes(w http.ResponseWriter, _ *http.Request) {
+	if p.reg == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	nodes := p.reg.List()
+	_ = writeJSON(w, http.StatusOK, map[string]any{
+		"object": "list",
+		"data":   nodes,
+	})
 }
 
 func (p *OpenAIProxy) handleModels(w http.ResponseWriter, r *http.Request) {

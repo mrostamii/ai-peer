@@ -18,6 +18,7 @@ import (
 	"github.com/mrostamii/ai-peer/pkg/config"
 	"github.com/mrostamii/ai-peer/pkg/gateway"
 	"github.com/mrostamii/ai-peer/pkg/node"
+	"github.com/mrostamii/ai-peer/pkg/registry"
 )
 
 func main() {
@@ -204,12 +205,50 @@ func runGatewayStart(args []string) {
 	if err := config.EnsureTCPAddrAvailable(resolvedListen); err != nil {
 		log.Fatalf("preflight failed for gateway listen: %v", err)
 	}
+	if err := config.EnsureTCPAddrAvailable(fmt.Sprintf("0.0.0.0:%d", cfg.Listen.TCPPort)); err != nil {
+		log.Fatalf("preflight failed for listen.tcp_port: %v", err)
+	}
+	if err := config.EnsureUDPAddrAvailable(fmt.Sprintf("0.0.0.0:%d", cfg.Listen.QUICPort)); err != nil {
+		log.Fatalf("preflight failed for listen.quic_port: %v", err)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	log.Printf("gateway start: listen=%s ollama=%s", resolvedListen, resolvedOllama)
-	proxy := gateway.NewOpenAIProxy(resolvedListen, resolvedOllama)
+	hb := time.Duration(cfg.Heartbeat.IntervalSec) * time.Second
+	reg := registry.New(hb)
+	rt, err := node.StartObserving(ctx, cfg, reg.ApplyHealthJSON)
+	if err != nil {
+		log.Fatalf("gateway p2p observe failed: %v", err)
+	}
+	defer func() {
+		if err := rt.Close(); err != nil {
+			log.Printf("gateway p2p shutdown warning: %v", err)
+		}
+	}()
+
+	pruneEvery := hb
+	if pruneEvery < 5*time.Second {
+		pruneEvery = 5 * time.Second
+	}
+	go func() {
+		t := time.NewTicker(pruneEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if n := reg.PruneStale(); n > 0 {
+					log.Printf("network registry: pruned %d stale node(s)", n)
+				}
+			}
+		}
+	}()
+
+	log.Printf("gateway start: listen=%s ollama=%s p2p=tcp/%d quic/%d (health topic %q)",
+		resolvedListen, resolvedOllama, cfg.Listen.TCPPort, cfg.Listen.QUICPort, node.HealthTopicID)
+	proxy := gateway.NewOpenAIProxy(resolvedListen, resolvedOllama, reg)
 	if err := proxy.Run(ctx); err != nil && err != context.Canceled {
 		log.Fatalf("gateway failed: %v", err)
 	}

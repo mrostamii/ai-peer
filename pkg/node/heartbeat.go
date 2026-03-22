@@ -9,7 +9,8 @@ import (
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 )
 
-const healthTopicID = "/ai-peer/v0.1/health"
+// HealthTopicID is the gossipsub topic for JSON health heartbeats (v0.1).
+const HealthTopicID = "/ai-peer/v0.1/health"
 
 type HealthUpdate struct {
 	NodeID      string  `json:"node_id"`

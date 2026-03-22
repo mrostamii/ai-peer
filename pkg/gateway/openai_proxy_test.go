@@ -1,11 +1,15 @@
 package gateway
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/mrostamii/ai-peer/pkg/registry"
 )
 
 func TestHandleChatCompletionsStream(t *testing.T) {
@@ -27,7 +31,7 @@ func TestHandleChatCompletionsStream(t *testing.T) {
 	}))
 	defer ollama.Close()
 
-	p := NewOpenAIProxy("127.0.0.1:0", ollama.URL)
+	p := NewOpenAIProxy("127.0.0.1:0", ollama.URL, nil)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
 		"model":"llama3.2:latest",
 		"messages":[{"role":"user","content":"say hello"}],
@@ -56,5 +60,31 @@ func TestHandleChatCompletionsStream(t *testing.T) {
 	}
 	if !strings.Contains(s, "data: [DONE]") {
 		t.Fatalf("expected [DONE] marker, got: %s", s)
+	}
+}
+
+func TestHandleNetworkNodes(t *testing.T) {
+	t.Parallel()
+	reg := registry.New(time.Minute)
+	ts := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	payload := fmt.Sprintf(`{"node_id":"peer-xyz","uptime_sec":10,"timestamp_ms":%d}`, ts.UnixMilli())
+	if err := reg.ApplyHealthJSON([]byte(payload)); err != nil {
+		t.Fatal(err)
+	}
+	p := NewOpenAIProxy("127.0.0.1:0", "http://unused", reg)
+	req := httptest.NewRequest(http.MethodGet, "/v1/network/nodes", nil)
+	rr := httptest.NewRecorder()
+	p.handleNetworkNodes(rr, req)
+	res := rr.Result()
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", res.StatusCode)
+	}
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "peer-xyz") {
+		t.Fatalf("expected peer in body: %s", body)
 	}
 }

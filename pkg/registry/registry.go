@@ -27,15 +27,15 @@ type Registry struct {
 
 // NodeRecord is a snapshot-friendly view of one peer.
 type NodeRecord struct {
-	NodeID          string
-	Models          []string
-	HardwareSummary string
-	LocationHint    string
-	PricingHint     string
-	LastSeen        time.Time
-	UptimeSec       int64
-	Load            float64
-	LatencyMs       int64
+	NodeID          string    `json:"node_id"`
+	Models          []string  `json:"models"`
+	HardwareSummary string    `json:"hardware_summary,omitempty"`
+	LocationHint    string    `json:"location_hint,omitempty"`
+	PricingHint     string    `json:"pricing_hint,omitempty"`
+	LastSeen        time.Time `json:"last_seen"`
+	UptimeSec       int64     `json:"uptime_sec"`
+	Load            float64   `json:"load"`
+	LatencyMs       int64     `json:"latency_ms"`
 }
 
 type healthJSON struct {
