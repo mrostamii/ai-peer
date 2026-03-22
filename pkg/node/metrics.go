@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"time"
 
@@ -15,7 +16,7 @@ func metricsHandler() http.Handler {
 	return promhttp.Handler()
 }
 
-func startMetricsServer(ctx context.Context, listen string) *http.Server {
+func startMetricsServer(ctx context.Context, listen string) (*http.Server, error) {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metricsHandler())
 	srv := &http.Server{
@@ -23,9 +24,13 @@ func startMetricsServer(ctx context.Context, listen string) *http.Server {
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+	ln, err := net.Listen("tcp", listen)
+	if err != nil {
+		return nil, fmt.Errorf("metrics listen %s: %w", listen, err)
+	}
 
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("metrics server warning: %v", err)
 		}
 	}()
@@ -40,7 +45,7 @@ func startMetricsServer(ctx context.Context, listen string) *http.Server {
 	}()
 
 	log.Printf("metrics server listening on %s", listen)
-	return srv
+	return srv, nil
 }
 
 func stopMetricsServer(srv *http.Server) error {

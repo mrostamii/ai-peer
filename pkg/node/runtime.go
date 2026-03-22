@@ -90,7 +90,13 @@ func Start(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 		log.Printf("default DHT bootstrap mode: reconnect loop disabled")
 	}
 	if cfg.Metrics.Enabled {
-		r.metricsSrv = startMetricsServer(ctx, cfg.Metrics.Listen)
+		metricsSrv, err := startMetricsServer(ctx, cfg.Metrics.Listen)
+		if err != nil {
+			_ = kdht.Close()
+			_ = h.Close()
+			return nil, err
+		}
+		r.metricsSrv = metricsSrv
 	}
 	hw := DetectHardware()
 	go r.advertiseCapabilitiesLoop(ctx, cfg.Models.Advertised, hw, "0")

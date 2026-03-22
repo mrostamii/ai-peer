@@ -84,6 +84,17 @@ func runNodeStart(args []string) {
 	if err != nil {
 		log.Fatalf("config invalid: %v", err)
 	}
+	if err := config.EnsureTCPAddrAvailable(fmt.Sprintf("0.0.0.0:%d", cfg.Listen.TCPPort)); err != nil {
+		log.Fatalf("preflight failed for listen.tcp_port: %v", err)
+	}
+	if err := config.EnsureUDPAddrAvailable(fmt.Sprintf("0.0.0.0:%d", cfg.Listen.QUICPort)); err != nil {
+		log.Fatalf("preflight failed for listen.quic_port: %v", err)
+	}
+	if cfg.Metrics.Enabled {
+		if err := config.EnsureTCPAddrAvailable(cfg.Metrics.Listen); err != nil {
+			log.Fatalf("preflight failed for metrics.listen: %v", err)
+		}
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -185,6 +196,9 @@ func runGatewayStart(args []string) {
 	resolvedOllama := cfg.Backend.BaseURL
 	if *ollamaBase != "" {
 		resolvedOllama = *ollamaBase
+	}
+	if err := config.EnsureTCPAddrAvailable(resolvedListen); err != nil {
+		log.Fatalf("preflight failed for gateway listen: %v", err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
