@@ -235,3 +235,156 @@ func TestHandleChatCompletionsStreamUsesRemoteNode(t *testing.T) {
 		t.Fatalf("expected [DONE] marker, got: %s", s)
 	}
 }
+
+func TestHandleChatCompletionsRetriesNextBestNode(t *testing.T) {
+	t.Parallel()
+	reg := registry.New(time.Minute)
+	now := time.Now().UnixMilli()
+	_ = reg.ApplyHealthJSON([]byte(fmt.Sprintf(`{"node_id":"peer-a","uptime_sec":200,"load":0.1,"latency_ms":5,"timestamp_ms":%d}`, now)))
+	_ = reg.ApplyHealthJSON([]byte(fmt.Sprintf(`{"node_id":"peer-b","uptime_sec":100,"load":0.4,"latency_ms":20,"timestamp_ms":%d}`, now)))
+	_ = reg.ApplyNodeAnnounceProto(&apiv1.NodeAnnounce{NodeId: "peer-a", Models: []string{"llama3.2:latest"}, TimestampMs: now})
+	_ = reg.ApplyNodeAnnounceProto(&apiv1.NodeAnnounce{NodeId: "peer-b", Models: []string{"llama3.2:latest"}, TimestampMs: now})
+
+	p := NewOpenAIProxy("127.0.0.1:0", "http://127.0.0.1:1", reg)
+	var tried []string
+	p.SetRemoteChatFunc(func(_ context.Context, nodeID string, _ *RemoteChatRequest) (*RemoteChatResponse, error) {
+		tried = append(tried, nodeID)
+		if nodeID == "peer-a" {
+			return nil, fmt.Errorf("transient")
+		}
+		return &RemoteChatResponse{
+			Model:            "llama3.2:latest",
+			Content:          "from-second-node",
+			CompletionTokens: 12,
+		}, nil
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"llama3.2:latest",
+		"messages":[{"role":"user","content":"hello"}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	p.handleChatCompletions(rr, req)
+	res := rr.Result()
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", res.StatusCode)
+	}
+	if len(tried) != 2 || tried[0] != "peer-a" || tried[1] != "peer-b" {
+		t.Fatalf("unexpected retry order: %v", tried)
+	}
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "from-second-node") {
+		t.Fatalf("expected fallback node response, got: %s", string(body))
+	}
+}
+
+func TestHandleChatCompletionsLimitsRetriesToTwo(t *testing.T) {
+	t.Parallel()
+	reg := registry.New(time.Minute)
+	now := time.Now().UnixMilli()
+	for i := 0; i < 5; i++ {
+		id := fmt.Sprintf("peer-%d", i)
+		_ = reg.ApplyHealthJSON([]byte(fmt.Sprintf(`{"node_id":"%s","uptime_sec":100,"load":0.1,"latency_ms":5,"timestamp_ms":%d}`, id, now)))
+		_ = reg.ApplyNodeAnnounceProto(&apiv1.NodeAnnounce{NodeId: id, Models: []string{"llama3.2:latest"}, TimestampMs: now})
+	}
+	p := NewOpenAIProxy("127.0.0.1:0", "http://127.0.0.1:1", reg)
+	attempts := 0
+	p.SetRemoteChatFunc(func(_ context.Context, _ string, _ *RemoteChatRequest) (*RemoteChatResponse, error) {
+		attempts++
+		return nil, fmt.Errorf("always fail")
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"llama3.2:latest",
+		"messages":[{"role":"user","content":"hello"}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	p.handleChatCompletions(rr, req)
+	if attempts != 3 {
+		t.Fatalf("attempts=%d want 3 (initial + 2 retries)", attempts)
+	}
+}
+
+func TestHandleChatCompletionsPrefersLowerPing(t *testing.T) {
+	t.Parallel()
+	reg := registry.New(time.Minute)
+	now := time.Now().UnixMilli()
+	_ = reg.ApplyHealthJSON([]byte(fmt.Sprintf(`{"node_id":"peer-a","uptime_sec":100,"load":0.1,"latency_ms":5,"timestamp_ms":%d}`, now)))
+	_ = reg.ApplyHealthJSON([]byte(fmt.Sprintf(`{"node_id":"peer-b","uptime_sec":100,"load":0.1,"latency_ms":25,"timestamp_ms":%d}`, now)))
+	_ = reg.ApplyNodeAnnounceProto(&apiv1.NodeAnnounce{NodeId: "peer-a", Models: []string{"llama3.2:latest"}, TimestampMs: now})
+	_ = reg.ApplyNodeAnnounceProto(&apiv1.NodeAnnounce{NodeId: "peer-b", Models: []string{"llama3.2:latest"}, TimestampMs: now})
+
+	p := NewOpenAIProxy("127.0.0.1:0", "http://127.0.0.1:1", reg)
+	p.SetPeerLatencyFunc(func(_ context.Context, nodeID string) (time.Duration, error) {
+		if nodeID == "peer-a" {
+			return 80 * time.Millisecond, nil
+		}
+		if nodeID == "peer-b" {
+			return 12 * time.Millisecond, nil
+		}
+		return 0, fmt.Errorf("unknown node %s", nodeID)
+	})
+	var tried []string
+	p.SetRemoteChatFunc(func(_ context.Context, nodeID string, _ *RemoteChatRequest) (*RemoteChatResponse, error) {
+		tried = append(tried, nodeID)
+		return &RemoteChatResponse{
+			Model:            "llama3.2:latest",
+			Content:          "ok",
+			CompletionTokens: 5,
+		}, nil
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"llama3.2:latest",
+		"messages":[{"role":"user","content":"hello"}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	p.handleChatCompletions(rr, req)
+	if len(tried) == 0 {
+		t.Fatal("expected at least one remote attempt")
+	}
+	if tried[0] != "peer-b" {
+		t.Fatalf("expected lower-ping peer first, got %v", tried)
+	}
+}
+
+func TestHandleChatCompletionsStreamFirstTokenTimeout(t *testing.T) {
+	t.Parallel()
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/chat" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		time.Sleep(80 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"model":"llama3.2:latest","message":{"role":"assistant","content":"late"},"done":true}` + "\n"))
+	}))
+	defer ollama.Close()
+
+	p := NewOpenAIProxy("127.0.0.1:0", ollama.URL, nil)
+	p.SetTimeouts(20*time.Millisecond, 2*time.Second)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"llama3.2:latest",
+		"messages":[{"role":"user","content":"say hello"}],
+		"stream":true
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	p.handleChatCompletions(rr, req)
+	res := rr.Result()
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusGatewayTimeout {
+		t.Fatalf("expected status 504, got %d", res.StatusCode)
+	}
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	if !strings.Contains(string(body), "first token timeout") {
+		t.Fatalf("expected first token timeout, got: %s", string(body))
+	}
+}

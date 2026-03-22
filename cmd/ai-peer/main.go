@@ -297,8 +297,19 @@ func runGatewayStart(args []string) {
 	log.Printf("gateway start: listen=%s ollama=%s p2p=tcp/%d quic/%d (health topic %q)",
 		resolvedListen, resolvedOllama, cfg.Listen.TCPPort, cfg.Listen.QUICPort, node.HealthTopicID)
 	proxy := gateway.NewOpenAIProxy(resolvedListen, resolvedOllama, reg)
+	proxy.SetTimeouts(
+		time.Duration(cfg.Timeouts.FirstTokenSec)*time.Second,
+		time.Duration(cfg.Timeouts.TotalRequestSec)*time.Second,
+	)
 	proxy.SetRemoteChatFunc(buildRemoteChatFunc(rt, cfg))
 	proxy.SetRemoteStreamChatFunc(buildRemoteStreamChatFunc(rt, cfg))
+	proxy.SetPeerLatencyFunc(func(ctx context.Context, nodeID string) (time.Duration, error) {
+		targetID, err := peer.Decode(nodeID)
+		if err != nil {
+			return 0, err
+		}
+		return rt.PingPeer(ctx, targetID)
+	})
 	if err := proxy.Run(ctx); err != nil && err != context.Canceled {
 		log.Fatalf("gateway failed: %v", err)
 	}

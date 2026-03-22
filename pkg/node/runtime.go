@@ -16,6 +16,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	noise "github.com/libp2p/go-libp2p/p2p/security/noise"
+	ping "github.com/libp2p/go-libp2p/p2p/protocol/ping"
 	ma "github.com/multiformats/go-multiaddr"
 
 	"github.com/mrostamii/ai-peer/pkg/backend/ollama"
@@ -252,4 +253,23 @@ func (r *Runtime) ConnectedPeers() []peer.AddrInfo {
 		})
 	}
 	return out
+}
+
+func (r *Runtime) PingPeer(ctx context.Context, target peer.ID) (time.Duration, error) {
+	if r.host == nil {
+		return 0, fmt.Errorf("host not initialized")
+	}
+	ch := ping.Ping(ctx, r.host, target)
+	select {
+	case res, ok := <-ch:
+		if !ok {
+			return 0, fmt.Errorf("ping channel closed")
+		}
+		if res.Error != nil {
+			return 0, res.Error
+		}
+		return res.RTT, nil
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
 }
