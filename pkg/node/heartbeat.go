@@ -13,11 +13,12 @@ import (
 const HealthTopicID = "/ai-peer/v0.1/health"
 
 type HealthUpdate struct {
-	NodeID      string  `json:"node_id"`
-	UptimeSec   int64   `json:"uptime_sec"`
-	Load        float64 `json:"load"`
-	LatencyMs   int64   `json:"latency_ms"`
-	TimestampMs int64   `json:"timestamp_ms"`
+	NodeID      string   `json:"node_id"`
+	UptimeSec   int64    `json:"uptime_sec"`
+	Load        float64  `json:"load"`
+	LatencyMs   int64    `json:"latency_ms"`
+	TimestampMs int64    `json:"timestamp_ms"`
+	Models      []string `json:"models,omitempty"`
 }
 
 type healthPublisher interface {
@@ -32,7 +33,7 @@ func (p *gossipsubPublisher) Publish(ctx context.Context, data []byte) error {
 	return p.topic.Publish(ctx, data)
 }
 
-func buildHealthUpdate(nodeID string, startedAt, now time.Time) ([]byte, error) {
+func buildHealthUpdate(nodeID string, models []string, startedAt, now time.Time) ([]byte, error) {
 	uptime := now.Sub(startedAt)
 	if uptime < 0 {
 		uptime = 0
@@ -43,21 +44,21 @@ func buildHealthUpdate(nodeID string, startedAt, now time.Time) ([]byte, error) 
 		Load:        0,
 		LatencyMs:   0,
 		TimestampMs: now.UnixMilli(),
+		Models:      models,
 	}
 	return json.Marshal(msg)
 }
 
-func publishHealthUpdate(ctx context.Context, pub healthPublisher, nodeID string, startedAt, now time.Time) error {
-	payload, err := buildHealthUpdate(nodeID, startedAt, now)
+func publishHealthUpdate(ctx context.Context, pub healthPublisher, nodeID string, models []string, startedAt, now time.Time) error {
+	payload, err := buildHealthUpdate(nodeID, models, startedAt, now)
 	if err != nil {
 		return err
 	}
 	return pub.Publish(ctx, payload)
 }
 
-func (r *Runtime) healthHeartbeatLoop(ctx context.Context, interval time.Duration, pub healthPublisher) {
-	// Publish one update immediately for faster initial discovery.
-	if err := publishHealthUpdate(ctx, pub, r.host.ID().String(), r.startedAt, time.Now()); err != nil {
+func (r *Runtime) healthHeartbeatLoop(ctx context.Context, interval time.Duration, pub healthPublisher, models []string) {
+	if err := publishHealthUpdate(ctx, pub, r.host.ID().String(), models, r.startedAt, time.Now()); err != nil {
 		log.Printf("health heartbeat warning: %v", err)
 	}
 
@@ -68,7 +69,7 @@ func (r *Runtime) healthHeartbeatLoop(ctx context.Context, interval time.Duratio
 		case <-ctx.Done():
 			return
 		case now := <-t.C:
-			if err := publishHealthUpdate(ctx, pub, r.host.ID().String(), r.startedAt, now); err != nil {
+			if err := publishHealthUpdate(ctx, pub, r.host.ID().String(), models, r.startedAt, now); err != nil {
 				log.Printf("health heartbeat warning: %v", err)
 			}
 		}

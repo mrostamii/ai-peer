@@ -353,6 +353,60 @@ func TestHandleChatCompletionsPrefersLowerPing(t *testing.T) {
 	}
 }
 
+func TestRankedNodesForModelUsesLoadLatencyUptimeOrdering(t *testing.T) {
+	t.Parallel()
+	reg := registry.New(time.Minute)
+	now := time.Now().UnixMilli()
+
+	// same model on all nodes; ordering should be:
+	// 1) lower load, 2) lower latency, 3) higher uptime
+	_ = reg.ApplyHealthJSON([]byte(fmt.Sprintf(`{"node_id":"peer-a","uptime_sec":100,"load":0.3,"latency_ms":5,"timestamp_ms":%d}`, now)))
+	_ = reg.ApplyHealthJSON([]byte(fmt.Sprintf(`{"node_id":"peer-b","uptime_sec":120,"load":0.1,"latency_ms":40,"timestamp_ms":%d}`, now)))
+	_ = reg.ApplyHealthJSON([]byte(fmt.Sprintf(`{"node_id":"peer-c","uptime_sec":80,"load":0.1,"latency_ms":10,"timestamp_ms":%d}`, now)))
+	_ = reg.ApplyNodeAnnounceProto(&apiv1.NodeAnnounce{NodeId: "peer-a", Models: []string{"llama3.2:latest"}, TimestampMs: now})
+	_ = reg.ApplyNodeAnnounceProto(&apiv1.NodeAnnounce{NodeId: "peer-b", Models: []string{"llama3.2:latest"}, TimestampMs: now})
+	_ = reg.ApplyNodeAnnounceProto(&apiv1.NodeAnnounce{NodeId: "peer-c", Models: []string{"llama3.2:latest"}, TimestampMs: now})
+
+	nodes := rankedNodesForModel(reg, "llama3.2:latest")
+	if len(nodes) != 3 {
+		t.Fatalf("len(nodes)=%d want 3", len(nodes))
+	}
+	// peer-c wins over peer-b due to lower latency at same load.
+	if nodes[0].NodeID != "peer-c" || nodes[1].NodeID != "peer-b" || nodes[2].NodeID != "peer-a" {
+		t.Fatalf("unexpected ranking: [%s %s %s]", nodes[0].NodeID, nodes[1].NodeID, nodes[2].NodeID)
+	}
+}
+
+func TestReorderNodesByPingFallsBackWhenPingFails(t *testing.T) {
+	t.Parallel()
+	p := NewOpenAIProxy("127.0.0.1:0", "http://unused", nil)
+	p.SetPeerLatencyFunc(func(_ context.Context, nodeID string) (time.Duration, error) {
+		if nodeID == "peer-a" {
+			return 0, fmt.Errorf("ping failed")
+		}
+		if nodeID == "peer-b" {
+			return 9 * time.Millisecond, nil
+		}
+		return 0, fmt.Errorf("unknown node")
+	})
+
+	nodes := []registry.NodeRecord{
+		{NodeID: "peer-a", LatencyMs: 3},
+		{NodeID: "peer-b", LatencyMs: 30},
+	}
+	got := p.reorderNodesByPing(context.Background(), nodes)
+	if len(got) != 2 {
+		t.Fatalf("len(got)=%d want 2", len(got))
+	}
+	// peer-a keeps its fallback latency (3ms) because ping failed; peer-b uses ping (9ms).
+	if got[0].NodeID != "peer-a" || got[1].NodeID != "peer-b" {
+		t.Fatalf("unexpected order after ping fallback: [%s %s]", got[0].NodeID, got[1].NodeID)
+	}
+	if got[0].LatencyMs != 3 || got[1].LatencyMs != 9 {
+		t.Fatalf("unexpected latencies after reorder: [%d %d]", got[0].LatencyMs, got[1].LatencyMs)
+	}
+}
+
 func TestHandleChatCompletionsStreamFirstTokenTimeout(t *testing.T) {
 	t.Parallel()
 	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -39,11 +39,12 @@ type NodeRecord struct {
 }
 
 type healthJSON struct {
-	NodeID      string  `json:"node_id"`
-	UptimeSec   int64   `json:"uptime_sec"`
-	Load        float64 `json:"load"`
-	LatencyMs   int64   `json:"latency_ms"`
-	TimestampMs int64   `json:"timestamp_ms"`
+	NodeID      string   `json:"node_id"`
+	UptimeSec   int64    `json:"uptime_sec"`
+	Load        float64  `json:"load"`
+	LatencyMs   int64    `json:"latency_ms"`
+	TimestampMs int64    `json:"timestamp_ms"`
+	Models      []string `json:"models,omitempty"`
 }
 
 // Option configures Registry construction.
@@ -137,6 +138,10 @@ func (r *Registry) ApplyHealthJSON(payload []byte) error {
 	rec.UptimeSec = hj.UptimeSec
 	rec.Load = hj.Load
 	rec.LatencyMs = hj.LatencyMs
+	if len(hj.Models) > 0 {
+		rec.Models = append([]string(nil), hj.Models...)
+		sort.Strings(rec.Models)
+	}
 	return nil
 }
 

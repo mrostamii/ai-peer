@@ -140,7 +140,7 @@ func Start(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 		log.Printf("health heartbeat disabled: join topic %q failed: %v", HealthTopicID, err)
 		return r, nil
 	}
-	go r.healthHeartbeatLoop(ctx, time.Duration(cfg.Heartbeat.IntervalSec)*time.Second, &gossipsubPublisher{topic: healthTopic})
+	go r.healthHeartbeatLoop(ctx, time.Duration(cfg.Heartbeat.IntervalSec)*time.Second, &gossipsubPublisher{topic: healthTopic}, cfg.Models.Advertised)
 	return r, nil
 }
 

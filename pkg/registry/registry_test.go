@@ -60,6 +60,48 @@ func TestNodesForModel(t *testing.T) {
 	}
 }
 
+func TestApplyHealthJSONWithModels(t *testing.T) {
+	now := time.Now()
+	r := New(30*time.Second, WithClock(func() time.Time { return now }))
+
+	payload := fmt.Sprintf(`{"node_id":"peer-q","uptime_sec":60,"timestamp_ms":%d,"models":["qwen2.5:3b","mistral:7b"]}`, now.UnixMilli())
+	if err := r.ApplyHealthJSON([]byte(payload)); err != nil {
+		t.Fatal(err)
+	}
+	list := r.List()
+	if len(list) != 1 {
+		t.Fatalf("len=%d want 1", len(list))
+	}
+	if len(list[0].Models) != 2 || list[0].Models[0] != "mistral:7b" || list[0].Models[1] != "qwen2.5:3b" {
+		t.Fatalf("models=%v want [mistral:7b qwen2.5:3b]", list[0].Models)
+	}
+
+	nodes := r.NodesForModel("qwen2.5:3b")
+	if len(nodes) != 1 || nodes[0].NodeID != "peer-q" {
+		t.Fatalf("qwen providers: %+v", nodes)
+	}
+}
+
+func TestApplyHealthJSONWithoutModelsPreservesExisting(t *testing.T) {
+	now := time.Now()
+	r := New(30*time.Second, WithClock(func() time.Time { return now }))
+
+	_ = r.ApplyNodeAnnounceProto(&apiv1.NodeAnnounce{
+		NodeId:      "peer-x",
+		Models:      []string{"llama"},
+		TimestampMs: now.UnixMilli(),
+	})
+
+	payload := fmt.Sprintf(`{"node_id":"peer-x","uptime_sec":10,"timestamp_ms":%d}`, now.UnixMilli())
+	if err := r.ApplyHealthJSON([]byte(payload)); err != nil {
+		t.Fatal(err)
+	}
+	list := r.List()
+	if len(list[0].Models) != 1 || list[0].Models[0] != "llama" {
+		t.Fatalf("models=%v want [llama] (should not be cleared)", list[0].Models)
+	}
+}
+
 func TestApplyHealthProto(t *testing.T) {
 	now := time.Now()
 	r := New(10*time.Second, WithClock(func() time.Time { return now }))
