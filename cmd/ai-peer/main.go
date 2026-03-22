@@ -10,7 +10,9 @@ import (
 	"os"
 	"os/signal"
 	"slices"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/mrostamii/ai-peer/pkg/backend/ollama"
 	"github.com/mrostamii/ai-peer/pkg/config"
@@ -30,6 +32,8 @@ func main() {
 		runConfigCheck(os.Args[2:])
 	case "node":
 		runNode(os.Args[2:])
+	case "network":
+		runNetwork(os.Args[2:])
 	case "gateway":
 		runGateway(os.Args[2:])
 	default:
@@ -210,4 +214,109 @@ func runGatewayStart(args []string) {
 		log.Fatalf("gateway failed: %v", err)
 	}
 	log.Printf("gateway stopped")
+}
+
+func runNetwork(args []string) {
+	if len(args) == 0 {
+		fmt.Println("usage: ai-peer network <peers|models> -file ./node.yaml")
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "peers":
+		runNetworkPeers(args[1:])
+	case "models":
+		runNetworkModels(args[1:])
+	default:
+		fmt.Printf("unknown network command: %s\n", args[0])
+		os.Exit(2)
+	}
+}
+
+func loadQueryRuntime(ctx context.Context, file string) (*node.Runtime, *config.Config, error) {
+	cfg, err := config.Load(file)
+	if err != nil {
+		return nil, nil, err
+	}
+	queryCfg := *cfg
+	queryCfg.Listen.TCPPort = 0
+	queryCfg.Listen.QUICPort = 0
+	queryCfg.Metrics.Enabled = false
+	rt, err := node.StartQueryOnly(ctx, &queryCfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	return rt, cfg, nil
+}
+
+func runNetworkPeers(args []string) {
+	fs := flag.NewFlagSet("network peers", flag.ExitOnError)
+	file := fs.String("file", "./node.yaml", "path to node.yaml")
+	timeout := fs.Duration("timeout", 12*time.Second, "max discovery time")
+	limit := fs.Int("limit", 32, "max providers per model lookup")
+	_ = fs.Parse(args)
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	rt, cfg, err := loadQueryRuntime(ctx, *file)
+	if err != nil {
+		log.Fatalf("network peers runtime start failed: %v", err)
+	}
+	defer func() {
+		_ = rt.Close()
+	}()
+	rt.ConnectBootstrapsOnce(ctx)
+	time.Sleep(2 * time.Second)
+
+	peers := rt.ConnectedPeers()
+	avail, err := rt.ListModelAvailability(ctx, cfg.Models.Advertised, *limit)
+	if err != nil {
+		log.Fatalf("network peers model lookup failed: %v", err)
+	}
+	modelsByPeer := map[string][]string{}
+	for _, m := range avail {
+		for _, p := range m.Providers {
+			modelsByPeer[p.ID.String()] = append(modelsByPeer[p.ID.String()], m.Model)
+		}
+	}
+	fmt.Printf("peers=%d\n", len(peers))
+	for _, p := range peers {
+		addrStrs := make([]string, 0, len(p.Addrs))
+		for _, a := range p.Addrs {
+			addrStrs = append(addrStrs, a.String())
+		}
+		peerModels := modelsByPeer[p.ID.String()]
+		if len(peerModels) == 0 {
+			fmt.Printf("- id=%s addrs=%s models=[]\n", p.ID, strings.Join(addrStrs, ","))
+			continue
+		}
+		fmt.Printf("- id=%s addrs=%s models=%v\n", p.ID, strings.Join(addrStrs, ","), peerModels)
+	}
+}
+
+func runNetworkModels(args []string) {
+	fs := flag.NewFlagSet("network models", flag.ExitOnError)
+	file := fs.String("file", "./node.yaml", "path to node.yaml")
+	timeout := fs.Duration("timeout", 15*time.Second, "max discovery time")
+	limit := fs.Int("limit", 32, "max providers per model")
+	_ = fs.Parse(args)
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	rt, cfg, err := loadQueryRuntime(ctx, *file)
+	if err != nil {
+		log.Fatalf("network models runtime start failed: %v", err)
+	}
+	defer func() {
+		_ = rt.Close()
+	}()
+	rt.ConnectBootstrapsOnce(ctx)
+	time.Sleep(2 * time.Second)
+
+	avail, err := rt.ListModelAvailability(ctx, cfg.Models.Advertised, *limit)
+	if err != nil {
+		log.Fatalf("network models query failed: %v", err)
+	}
+	for _, m := range avail {
+		fmt.Printf("- model=%s providers=%d\n", m.Model, m.ProviderCount)
+	}
 }

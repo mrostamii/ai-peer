@@ -83,3 +83,26 @@ func TestFindModelProvidersExcludesSelfAndEmptyAddrs(t *testing.T) {
 		t.Fatalf("unexpected providers: %#v", got)
 	}
 }
+
+func TestListModelAvailabilityDedupesModels(t *testing.T) {
+	t.Parallel()
+	addr, err := ma.NewMultiaddr("/ip4/1.2.3.4/tcp/4001")
+	if err != nil {
+		t.Fatalf("NewMultiaddr() error = %v", err)
+	}
+	f := &fakeFinder{
+		out: []peer.AddrInfo{
+			{ID: peer.ID("p1"), Addrs: []ma.Multiaddr{addr}},
+		},
+	}
+	got, err := listModelAvailability(context.Background(), f, peer.ID("self"), []string{"llama3.2:latest", "llama3.2:latest"}, 5)
+	if err != nil {
+		t.Fatalf("listModelAvailability() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 model entry, got %d", len(got))
+	}
+	if got[0].Model != "llama3.2:latest" || got[0].ProviderCount != 1 {
+		t.Fatalf("unexpected availability: %+v", got[0])
+	}
+}

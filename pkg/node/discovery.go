@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -24,6 +25,12 @@ type providerRouter interface {
 
 type providerFinder interface {
 	FindProvidersAsync(context.Context, cid.Cid, int) <-chan peer.AddrInfo
+}
+
+type ModelAvailability struct {
+	Model         string
+	ProviderCount int
+	Providers     []peer.AddrInfo
 }
 
 func modelProviderCID(model string) (cid.Cid, error) {
@@ -138,4 +145,33 @@ func findModelProviders(ctx context.Context, finder providerFinder, self peer.ID
 
 func (r *Runtime) FindModelProviders(ctx context.Context, model string, limit int) ([]peer.AddrInfo, error) {
 	return findModelProviders(ctx, r.dht, r.host.ID(), model, limit)
+}
+
+func listModelAvailability(ctx context.Context, finder providerFinder, self peer.ID, models []string, limit int) ([]ModelAvailability, error) {
+	uniq := make([]string, 0, len(models))
+	for _, m := range models {
+		m = strings.TrimSpace(m)
+		if m == "" || slices.Contains(uniq, m) {
+			continue
+		}
+		uniq = append(uniq, m)
+	}
+
+	out := make([]ModelAvailability, 0, len(uniq))
+	for _, m := range uniq {
+		providers, err := findModelProviders(ctx, finder, self, m, limit)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ModelAvailability{
+			Model:         m,
+			ProviderCount: len(providers),
+			Providers:     providers,
+		})
+	}
+	return out, nil
+}
+
+func (r *Runtime) ListModelAvailability(ctx context.Context, models []string, limit int) ([]ModelAvailability, error) {
+	return listModelAvailability(ctx, r.dht, r.host.ID(), models, limit)
 }

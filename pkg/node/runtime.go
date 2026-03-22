@@ -32,7 +32,7 @@ type Runtime struct {
 	metricsSrv *http.Server
 }
 
-func Start(ctx context.Context, cfg *config.Config) (*Runtime, error) {
+func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 	useCustomBootstraps := len(cfg.Network.BootstrapPeers) > 0
 	var bootstraps []peer.AddrInfo
 	var err error
@@ -49,6 +49,12 @@ func Start(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 
 	listenTCP := fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", cfg.Listen.TCPPort)
 	listenQUIC := fmt.Sprintf("/ip4/0.0.0.0/udp/%d/quic-v1", cfg.Listen.QUICPort)
+
+	dhtMode := dht.ModeServer
+	if cfg.Listen.TCPPort == 0 && cfg.Listen.QUICPort == 0 {
+		dhtMode = dht.ModeClient
+	}
+
 	h, err := libp2p.New(
 		libp2p.ListenAddrStrings(listenTCP, listenQUIC),
 		libp2p.Security(noise.ID, noise.New),
@@ -62,7 +68,7 @@ func Start(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 	}
 
 	kdht, err := dht.New(ctx, h,
-		dht.Mode(dht.ModeServer),
+		dht.Mode(dhtMode),
 		dht.BootstrapPeers(bootstraps...),
 	)
 	if err != nil {
@@ -83,7 +89,16 @@ func Start(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 		reconnect:  useCustomBootstraps,
 		startedAt:  time.Now(),
 	}
+	return r, nil
+}
+
+func Start(ctx context.Context, cfg *config.Config) (*Runtime, error) {
+	r, err := startBase(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
 	r.logDialAddrs()
+
 	if r.reconnect {
 		go r.bootstrapReconnectLoop(ctx)
 	} else {
@@ -92,15 +107,15 @@ func Start(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 	if cfg.Metrics.Enabled {
 		metricsSrv, err := startMetricsServer(ctx, cfg.Metrics.Listen)
 		if err != nil {
-			_ = kdht.Close()
-			_ = h.Close()
+			_ = r.dht.Close()
+			_ = r.host.Close()
 			return nil, err
 		}
 		r.metricsSrv = metricsSrv
 	}
 	hw := DetectHardware()
 	go r.advertiseCapabilitiesLoop(ctx, cfg.Models.Advertised, hw, "0")
-	ps, err := pubsub.NewGossipSub(ctx, h)
+	ps, err := pubsub.NewGossipSub(ctx, r.host)
 	if err != nil {
 		log.Printf("health heartbeat disabled: init gossipsub failed: %v", err)
 		return r, nil
@@ -112,6 +127,10 @@ func Start(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 	}
 	go r.healthHeartbeatLoop(ctx, time.Duration(cfg.Heartbeat.IntervalSec)*time.Second, &gossipsubPublisher{topic: healthTopic})
 	return r, nil
+}
+
+func StartQueryOnly(ctx context.Context, cfg *config.Config) (*Runtime, error) {
+	return startBase(ctx, cfg)
 }
 
 func (r *Runtime) Close() error {
@@ -200,4 +219,23 @@ func ParseBootstrapPeers(raw []string) ([]peer.AddrInfo, error) {
 		out = append(out, *info)
 	}
 	return out, nil
+}
+
+func (r *Runtime) ConnectBootstrapsOnce(ctx context.Context) {
+	r.connectBootstraps(ctx, false)
+}
+
+func (r *Runtime) ConnectedPeers() []peer.AddrInfo {
+	if r.host == nil {
+		return nil
+	}
+	peers := r.host.Network().Peers()
+	out := make([]peer.AddrInfo, 0, len(peers))
+	for _, id := range peers {
+		out = append(out, peer.AddrInfo{
+			ID:    id,
+			Addrs: r.host.Peerstore().Addrs(id),
+		})
+	}
+	return out
 }
