@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -121,7 +122,7 @@ func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if oreq.Stream {
-		_ = writeJSON(w, http.StatusNotImplemented, openAIError(http.StatusNotImplemented, "gateway v0.1: set stream=false; streaming not implemented yet"))
+		p.handleChatCompletionsStream(w, r, &oreq)
 		return
 	}
 
@@ -165,6 +166,100 @@ func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 	_ = writeJSON(w, http.StatusOK, openAIChatCompletionFromOllama(&ochat, oreq.Model))
 }
 
+func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http.Request, oreq *openAIChatRequest) {
+	body := toOllamaChatBody(oreq)
+	raw, err := json.Marshal(body)
+	if err != nil {
+		_ = writeJSON(w, http.StatusInternalServerError, openAIError(http.StatusInternalServerError, err.Error()))
+		return
+	}
+
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, p.ollamaBase+"/api/chat", bytes.NewReader(raw))
+	if err != nil {
+		_ = writeJSON(w, http.StatusInternalServerError, openAIError(http.StatusInternalServerError, err.Error()))
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		_ = writeJSON(w, http.StatusBadGateway, openAIError(http.StatusBadGateway, err.Error()))
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+		_ = writeJSON(w, http.StatusBadGateway, openAIError(http.StatusBadGateway, string(respBody)))
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		_ = writeJSON(w, http.StatusInternalServerError, openAIError(http.StatusInternalServerError, "streaming not supported by server writer"))
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	chatID := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
+	created := time.Now().Unix()
+	model := oreq.Model
+
+	dec := json.NewDecoder(bufio.NewReader(resp.Body))
+	firstChunk := true
+	for {
+		var chunk ollamaStreamResponse
+		if err := dec.Decode(&chunk); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return
+		}
+		if model == "" && chunk.Model != "" {
+			model = chunk.Model
+		}
+		delta := map[string]any{}
+		if firstChunk {
+			delta["role"] = "assistant"
+		}
+		if chunk.Message.Content != "" {
+			delta["content"] = chunk.Message.Content
+		}
+		finishReason := any(nil)
+		if chunk.Done {
+			finishReason = "stop"
+		}
+		firstChunk = false
+
+		event := map[string]any{
+			"id":      chatID,
+			"object":  "chat.completion.chunk",
+			"created": created,
+			"model":   model,
+			"choices": []map[string]any{
+				{
+					"index":         0,
+					"delta":         delta,
+					"finish_reason": finishReason,
+				},
+			},
+		}
+		chunkRaw, err := json.Marshal(event)
+		if err != nil {
+			return
+		}
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", chunkRaw); err != nil {
+			return
+		}
+		flusher.Flush()
+	}
+
+	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	flusher.Flush()
+}
+
 type openAIChatRequest struct {
 	Model       string              `json:"model"`
 	Messages    []openAIChatMessage `json:"messages"`
@@ -185,6 +280,15 @@ type ollamaChatResponse struct {
 	} `json:"message"`
 	PromptEvalCount int `json:"prompt_eval_count"`
 	EvalCount       int `json:"eval_count"`
+}
+
+type ollamaStreamResponse struct {
+	Model   string `json:"model"`
+	Message struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	} `json:"message"`
+	Done bool `json:"done"`
 }
 
 func toOllamaChatBody(req *openAIChatRequest) map[string]any {
