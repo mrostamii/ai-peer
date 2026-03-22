@@ -1,0 +1,29 @@
+node:
+  name: "ovh-lon-1"
+
+listen:
+  tcp_port: 4001
+  quic_port: 4001
+
+network:
+  bootstrap_peers:
+    - "/ip4/51.195.145.102/tcp/4001/p2p/12D3KooExamplePeerId"
+
+backend:
+  type: "ollama"
+  base_url: "http://127.0.0.1:11434"
+
+models:
+  advertised:
+    - "llama3.2:latest"
+
+heartbeat:
+  interval_sec: 30
+
+timeouts:
+  first_token_sec: 30
+  total_request_sec: 120
+
+metrics:
+  enabled: true
+  listen: "127.0.0.1:9090"
