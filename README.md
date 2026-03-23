@@ -1,20 +1,16 @@
 # ai-peer
 
-**Decentralized AI inference protocol** — coordination, routing, and (later) economics over libp2p, with an OpenAI-compatible gateway. This repository is the working home for the project ([github.com/mrostamii/ai-peer](https://github.com/mrostamii/ai-peer)).
-
-## Problem
-
-Centralized inference is expensive and gated; many GPUs sit idle. Prior decentralized efforts proved technical feasibility (Petals, Exo, Parallax, etc.) but lacked a durable **economic coordination layer**.
+**Decentralized AI inference protocol**; coordination, routing, and (later) economics over libp2p, with an OpenAI-compatible gateway.
 
 ## Solution
 
 We build the **protocol layer**, not the inference engine. Operators plug in Ollama, vLLM, llama.cpp, or other backends. This project focuses on:
 
-1. **Discovery** — who is online, which models they serve, hardware signals
-2. **Routing** — latency- and cost-aware request routing across heterogeneous nodes
-3. **Trust** — reputation, staking, proof-of-inference
-4. **Payments** — USDC settlement on Base, x402-style flows where appropriate
-5. **API gateway** — single OpenAI-compatible surface for clients
+1. **Discovery**: who is online, which models they serve, hardware signals
+2. **Routing**: latency- and cost-aware request routing across heterogeneous nodes
+3. **Trust**: reputation, staking, proof-of-inference
+4. **Payments**: USDC settlement on Base, x402-style flows where appropriate
+5. **API gateway**: single OpenAI-compatible surface for clients
 
 ### In scope vs out of scope
 
