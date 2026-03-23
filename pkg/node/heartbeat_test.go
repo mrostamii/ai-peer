@@ -23,7 +23,7 @@ func TestBuildHealthUpdate(t *testing.T) {
 	now := time.Unix(1710000000, 0)
 	started := now.Add(-75 * time.Second)
 	models := []string{"qwen2.5:3b", "llama3.2:latest"}
-	msg, err := buildHealthUpdate("peer-1", models, started, now, 0.75, 42)
+	msg, err := buildHealthUpdate("peer-1", models, started, now, 0.75, 42, 1800, 21.5)
 	if err != nil {
 		t.Fatalf("buildHealthUpdate() error = %v", err)
 	}
@@ -41,6 +41,9 @@ func TestBuildHealthUpdate(t *testing.T) {
 	if out.Load != 0.75 || out.LatencyMs != 42 {
 		t.Fatalf("expected load=0.75 latency=42, got load=%f latency=%d", out.Load, out.LatencyMs)
 	}
+	if out.TTFTMs != 1800 || out.DecodeTPS != 21.5 {
+		t.Fatalf("expected ttft=1800 decode_tps=21.5, got ttft=%d decode_tps=%f", out.TTFTMs, out.DecodeTPS)
+	}
 	if len(out.Models) != 2 || out.Models[0] != "qwen2.5:3b" || out.Models[1] != "llama3.2:latest" {
 		t.Fatalf("unexpected models: %v", out.Models)
 	}
@@ -50,7 +53,7 @@ func TestBuildHealthUpdateNilModels(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1710000000, 0)
 	started := now.Add(-10 * time.Second)
-	msg, err := buildHealthUpdate("peer-2", nil, started, now, 0, 0)
+	msg, err := buildHealthUpdate("peer-2", nil, started, now, 0, 0, 0, 0)
 	if err != nil {
 		t.Fatalf("buildHealthUpdate() error = %v", err)
 	}
@@ -69,7 +72,7 @@ func TestPublishHealthUpdate(t *testing.T) {
 	pub := &mockPublisher{}
 	now := time.Unix(1710000000, 0)
 	started := now.Add(-10 * time.Second)
-	if err := publishHealthUpdate(context.Background(), pub, "peer-1", []string{"mistral:7b"}, started, now, 0.5, 18); err != nil {
+	if err := publishHealthUpdate(context.Background(), pub, "peer-1", []string{"mistral:7b"}, started, now, 0.5, 18, 700, 33.3); err != nil {
 		t.Fatalf("publishHealthUpdate() error = %v", err)
 	}
 	if len(pub.payloads) != 1 {
@@ -85,27 +88,37 @@ func TestPublishHealthUpdate(t *testing.T) {
 	if out.Load != 0.5 || out.LatencyMs != 18 {
 		t.Fatalf("expected load=0.5 latency=18, got load=%f latency=%d", out.Load, out.LatencyMs)
 	}
+	if out.TTFTMs != 700 || out.DecodeTPS != 33.3 {
+		t.Fatalf("expected ttft=700 decode_tps=33.3, got ttft=%d decode_tps=%f", out.TTFTMs, out.DecodeTPS)
+	}
 }
 
 func TestRuntimeHealthSnapshotReflectsInferenceStats(t *testing.T) {
 	t.Parallel()
 	var r Runtime
 	started := r.markInferenceStarted()
-	load, latency := r.healthSnapshot()
+	load, latency, ttft, decodeTPS := r.healthSnapshot()
 	if load != 1 {
 		t.Fatalf("expected in-flight load 1, got %f", load)
 	}
 	if latency != 0 {
 		t.Fatalf("expected zero latency before completion, got %d", latency)
 	}
+	if ttft != 0 || decodeTPS != 0 {
+		t.Fatalf("expected zero ttft/decode before completion, got ttft=%d decode_tps=%f", ttft, decodeTPS)
+	}
 
 	time.Sleep(2 * time.Millisecond)
-	r.markInferenceFinished(started)
-	load, latency = r.healthSnapshot()
+	r.recordInferenceSample(time.Since(started), time.Since(started), 16)
+	r.markInferenceFinished()
+	load, latency, ttft, decodeTPS = r.healthSnapshot()
 	if load != 0 {
 		t.Fatalf("expected load 0 after completion, got %f", load)
 	}
 	if latency <= 0 {
 		t.Fatalf("expected positive latency after completion, got %d", latency)
+	}
+	if ttft <= 0 || decodeTPS <= 0 {
+		t.Fatalf("expected positive ttft/decode after completion, got ttft=%d decode_tps=%f", ttft, decodeTPS)
 	}
 }

@@ -39,6 +39,10 @@ type Runtime struct {
 	statsMu           sync.RWMutex
 	latencyEMAms      float64
 	hasLatencySample  bool
+	ttftEMAms         float64
+	hasTTFTSample     bool
+	decodeTPSEMA      float64
+	hasDecodeSample   bool
 }
 
 func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {

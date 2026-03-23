@@ -36,6 +36,8 @@ type NodeRecord struct {
 	UptimeSec       int64     `json:"uptime_sec"`
 	Load            float64   `json:"load"`
 	LatencyMs       int64     `json:"latency_ms"`
+	TTFTMs          int64     `json:"ttft_ms"`
+	DecodeTPS       float64   `json:"decode_tps"`
 }
 
 type healthJSON struct {
@@ -43,6 +45,8 @@ type healthJSON struct {
 	UptimeSec   int64    `json:"uptime_sec"`
 	Load        float64  `json:"load"`
 	LatencyMs   int64    `json:"latency_ms"`
+	TTFTMs      int64    `json:"ttft_ms"`
+	DecodeTPS   float64  `json:"decode_tps"`
 	TimestampMs int64    `json:"timestamp_ms"`
 	Models      []string `json:"models,omitempty"`
 }
@@ -138,6 +142,8 @@ func (r *Registry) ApplyHealthJSON(payload []byte) error {
 	rec.UptimeSec = hj.UptimeSec
 	rec.Load = hj.Load
 	rec.LatencyMs = hj.LatencyMs
+	rec.TTFTMs = hj.TTFTMs
+	rec.DecodeTPS = hj.DecodeTPS
 	if len(hj.Models) > 0 {
 		rec.Models = append([]string(nil), hj.Models...)
 		sort.Strings(rec.Models)

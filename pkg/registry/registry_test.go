@@ -82,6 +82,26 @@ func TestApplyHealthJSONWithModels(t *testing.T) {
 	}
 }
 
+func TestApplyHealthJSONWithTTFTAndDecodeTPS(t *testing.T) {
+	now := time.Now()
+	r := New(30*time.Second, WithClock(func() time.Time { return now }))
+
+	payload := fmt.Sprintf(`{"node_id":"peer-m","uptime_sec":12,"load":1.5,"latency_ms":2100,"ttft_ms":550,"decode_tps":42.25,"timestamp_ms":%d}`, now.UnixMilli())
+	if err := r.ApplyHealthJSON([]byte(payload)); err != nil {
+		t.Fatal(err)
+	}
+	list := r.List()
+	if len(list) != 1 {
+		t.Fatalf("len=%d want 1", len(list))
+	}
+	if list[0].TTFTMs != 550 {
+		t.Fatalf("ttft_ms=%d want 550", list[0].TTFTMs)
+	}
+	if list[0].DecodeTPS != 42.25 {
+		t.Fatalf("decode_tps=%f want 42.25", list[0].DecodeTPS)
+	}
+}
+
 func TestApplyHealthJSONWithoutModelsPreservesExisting(t *testing.T) {
 	now := time.Now()
 	r := New(30*time.Second, WithClock(func() time.Time { return now }))

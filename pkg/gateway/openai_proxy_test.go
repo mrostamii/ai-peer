@@ -450,16 +450,16 @@ func TestHandleChatCompletionsPrefersLowerPing(t *testing.T) {
 	}
 }
 
-func TestRankedNodesForModelUsesLoadLatencyUptimeOrdering(t *testing.T) {
+func TestRankedNodesForModelUsesLoadTTFTDecodeOrdering(t *testing.T) {
 	t.Parallel()
 	reg := registry.New(time.Minute)
 	now := time.Now().UnixMilli()
 
 	// same model on all nodes; ordering should be:
-	// 1) lower load, 2) lower latency, 3) higher uptime
-	_ = reg.ApplyHealthJSON([]byte(fmt.Sprintf(`{"node_id":"peer-a","uptime_sec":100,"load":0.3,"latency_ms":5,"timestamp_ms":%d}`, now)))
-	_ = reg.ApplyHealthJSON([]byte(fmt.Sprintf(`{"node_id":"peer-b","uptime_sec":120,"load":0.1,"latency_ms":40,"timestamp_ms":%d}`, now)))
-	_ = reg.ApplyHealthJSON([]byte(fmt.Sprintf(`{"node_id":"peer-c","uptime_sec":80,"load":0.1,"latency_ms":10,"timestamp_ms":%d}`, now)))
+	// 1) lower load, 2) lower ttft, 3) higher decode_tps
+	_ = reg.ApplyHealthJSON([]byte(fmt.Sprintf(`{"node_id":"peer-a","uptime_sec":100,"load":0.3,"latency_ms":5,"ttft_ms":1500,"decode_tps":10,"timestamp_ms":%d}`, now)))
+	_ = reg.ApplyHealthJSON([]byte(fmt.Sprintf(`{"node_id":"peer-b","uptime_sec":120,"load":0.1,"latency_ms":40,"ttft_ms":900,"decode_tps":18,"timestamp_ms":%d}`, now)))
+	_ = reg.ApplyHealthJSON([]byte(fmt.Sprintf(`{"node_id":"peer-c","uptime_sec":80,"load":0.1,"latency_ms":10,"ttft_ms":600,"decode_tps":12,"timestamp_ms":%d}`, now)))
 	_ = reg.ApplyNodeAnnounceProto(&apiv1.NodeAnnounce{NodeId: "peer-a", Models: []string{"llama3.2:latest"}, TimestampMs: now})
 	_ = reg.ApplyNodeAnnounceProto(&apiv1.NodeAnnounce{NodeId: "peer-b", Models: []string{"llama3.2:latest"}, TimestampMs: now})
 	_ = reg.ApplyNodeAnnounceProto(&apiv1.NodeAnnounce{NodeId: "peer-c", Models: []string{"llama3.2:latest"}, TimestampMs: now})
@@ -468,7 +468,7 @@ func TestRankedNodesForModelUsesLoadLatencyUptimeOrdering(t *testing.T) {
 	if len(nodes) != 3 {
 		t.Fatalf("len(nodes)=%d want 3", len(nodes))
 	}
-	// peer-c wins over peer-b due to lower latency at same load.
+	// peer-c wins over peer-b due to lower TTFT at same load.
 	if nodes[0].NodeID != "peer-c" || nodes[1].NodeID != "peer-b" || nodes[2].NodeID != "peer-a" {
 		t.Fatalf("unexpected ranking: [%s %s %s]", nodes[0].NodeID, nodes[1].NodeID, nodes[2].NodeID)
 	}

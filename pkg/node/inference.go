@@ -33,7 +33,7 @@ func (r *Runtime) registerInferenceHandler(backend inferenceBackend) {
 	r.host.SetStreamHandler(InferenceProtocolID, func(s network.Stream) {
 		defer s.Close()
 		inferStarted := r.markInferenceStarted()
-		defer r.markInferenceFinished(inferStarted)
+		defer r.markInferenceFinished()
 		var req apiv1.InferenceRequest
 		if err := json.NewDecoder(io.LimitReader(s, 4<<20)).Decode(&req); err != nil {
 			_ = json.NewEncoder(s).Encode(&apiv1.InferenceResponse{
@@ -52,6 +52,9 @@ func (r *Runtime) registerInferenceHandler(backend inferenceBackend) {
 			})
 			return
 		}
+		total := time.Since(inferStarted)
+		// Unary backend responses do not expose TTFT, so use total duration as a proxy.
+		r.recordInferenceSample(total, total, resp.GetTokensUsed())
 		resp.LatencyMs = time.Since(started).Milliseconds()
 		if err := json.NewEncoder(s).Encode(resp); err != nil {
 			log.Printf("inference stream encode warning: %v", err)
@@ -62,8 +65,17 @@ func (r *Runtime) registerInferenceHandler(backend inferenceBackend) {
 func (r *Runtime) registerInferenceStreamHandler(backend streamInferenceBackend) {
 	r.host.SetStreamHandler(InferenceStreamProtocolID, func(s network.Stream) {
 		defer s.Close()
-		inferStarted := r.markInferenceStarted()
-		defer r.markInferenceFinished(inferStarted)
+		_ = r.markInferenceStarted()
+		streamStarted := time.Now()
+		var sampleTotal time.Duration
+		var sampleTTFT time.Duration
+		haveSample := false
+		defer func() {
+			if haveSample {
+				r.recordInferenceSample(sampleTotal, sampleTTFT, 0)
+			}
+			r.markInferenceFinished()
+		}()
 		var req apiv1.InferenceRequest
 		if err := json.NewDecoder(io.LimitReader(s, 4<<20)).Decode(&req); err != nil {
 			_ = json.NewEncoder(s).Encode(&apiv1.InferenceStreamChunk{
@@ -87,6 +99,7 @@ func (r *Runtime) registerInferenceStreamHandler(backend streamInferenceBackend)
 		defer rc.Close()
 
 		dec := json.NewDecoder(bufio.NewReader(rc))
+		gotFirst := false
 		for {
 			var chunk struct {
 				Model   string `json:"model"`
@@ -99,6 +112,13 @@ func (r *Runtime) registerInferenceStreamHandler(backend streamInferenceBackend)
 			}
 			if err := dec.Decode(&chunk); err != nil {
 				if err == io.EOF {
+					if gotFirst {
+						sampleTotal = time.Since(streamStarted)
+						if sampleTTFT <= 0 {
+							sampleTTFT = sampleTotal
+						}
+						haveSample = true
+					}
 					_ = json.NewEncoder(s).Encode(&apiv1.InferenceStreamChunk{
 						RequestId: req.GetRequestId(),
 						Done:      true,
@@ -114,6 +134,10 @@ func (r *Runtime) registerInferenceStreamHandler(backend streamInferenceBackend)
 				})
 				return
 			}
+			if !gotFirst {
+				gotFirst = true
+				sampleTTFT = time.Since(streamStarted)
+			}
 			if err := json.NewEncoder(s).Encode(&apiv1.InferenceStreamChunk{
 				RequestId: req.GetRequestId(),
 				Model:     chunk.Model,
@@ -125,6 +149,11 @@ func (r *Runtime) registerInferenceStreamHandler(backend streamInferenceBackend)
 				return
 			}
 			if chunk.Done {
+				sampleTotal = time.Since(streamStarted)
+				if sampleTTFT <= 0 {
+					sampleTTFT = sampleTotal
+				}
+				haveSample = true
 				return
 			}
 		}

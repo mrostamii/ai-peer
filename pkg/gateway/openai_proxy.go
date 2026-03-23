@@ -641,6 +641,22 @@ func rankedNodesForModel(reg *registry.Registry, model string) []registry.NodeRe
 		if a.Load != b.Load {
 			return a.Load < b.Load
 		}
+		aHasTTFT := a.TTFTMs > 0
+		bHasTTFT := b.TTFTMs > 0
+		if aHasTTFT != bHasTTFT {
+			return aHasTTFT
+		}
+		if aHasTTFT && a.TTFTMs != b.TTFTMs {
+			return a.TTFTMs < b.TTFTMs
+		}
+		aHasDecode := a.DecodeTPS > 0
+		bHasDecode := b.DecodeTPS > 0
+		if aHasDecode != bHasDecode {
+			return aHasDecode
+		}
+		if aHasDecode && a.DecodeTPS != b.DecodeTPS {
+			return a.DecodeTPS > b.DecodeTPS
+		}
 		if a.LatencyMs != b.LatencyMs {
 			return a.LatencyMs < b.LatencyMs
 		}
