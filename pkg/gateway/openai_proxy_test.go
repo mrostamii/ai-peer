@@ -16,6 +16,7 @@ import (
 
 	"github.com/mrostamii/ai-peer/pkg/apiv1"
 	"github.com/mrostamii/ai-peer/pkg/registry"
+	"github.com/mrostamii/ai-peer/pkg/x402spike"
 )
 
 func TestHandleChatCompletionsStream(t *testing.T) {
@@ -537,5 +538,138 @@ func TestHandleChatCompletionsStreamFirstTokenTimeout(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "first token timeout") {
 		t.Fatalf("expected first token timeout, got: %s", string(body))
+	}
+}
+
+func TestHandleChatCompletionsRequiresPaymentWhenX402Enabled(t *testing.T) {
+	t.Parallel()
+	p := NewOpenAIProxy("127.0.0.1:0", "http://127.0.0.1:1", nil)
+	p.SetX402ChatPaywall(&X402PaywallConfig{
+		FacilitatorURL: "",
+		Requirement: x402spike.PaymentRequirements{
+			Scheme:            "exact",
+			Network:           "eip155:84532",
+			Amount:            "10000",
+			Asset:             "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+			PayTo:             "0x209693Bc6afc0C5328bA36FaF03C514EF312287C",
+			MaxTimeoutSeconds: 60,
+			Extra: map[string]any{
+				"name":    "USDC",
+				"version": "2",
+			},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"llama3.2:latest",
+		"messages":[{"role":"user","content":"hello"}]
+	}`))
+	req.Host = "127.0.0.1:8080"
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	p.handleChatCompletions(rr, req)
+	res := rr.Result()
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusPaymentRequired {
+		t.Fatalf("status=%d want 402", res.StatusCode)
+	}
+	if got := res.Header.Get("PAYMENT-REQUIRED"); got == "" {
+		t.Fatalf("expected PAYMENT-REQUIRED header")
+	}
+}
+
+func TestHandleChatCompletionsWithPaymentAndFacilitator(t *testing.T) {
+	t.Parallel()
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/chat" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"model":"llama3.2:latest","message":{"role":"assistant","content":"paid ok"},"prompt_eval_count":1,"eval_count":1}`))
+	}))
+	defer ollama.Close()
+
+	facilitator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/verify":
+			_ = writeJSON(w, http.StatusOK, map[string]any{
+				"isValid": true,
+				"payer":   "0x4721bf8712bd233398730719fd9455f3c97d415d",
+			})
+		case "/settle":
+			_ = writeJSON(w, http.StatusOK, map[string]any{
+				"success":     true,
+				"payer":       "0x4721bf8712bd233398730719fd9455f3c97d415d",
+				"transaction": "0xabc123",
+				"network":     "eip155:84532",
+			})
+		default:
+			t.Fatalf("unexpected facilitator path: %s", r.URL.Path)
+		}
+	}))
+	defer facilitator.Close()
+
+	p := NewOpenAIProxy("127.0.0.1:0", ollama.URL, nil)
+	reqCfg := x402spike.PaymentRequirements{
+		Scheme:            "exact",
+		Network:           "eip155:84532",
+		Amount:            "10000",
+		Asset:             "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+		PayTo:             "0x209693Bc6afc0C5328bA36FaF03C514EF312287C",
+		MaxTimeoutSeconds: 60,
+		Extra: map[string]any{
+			"name":    "USDC",
+			"version": "2",
+		},
+	}
+	p.SetX402ChatPaywall(&X402PaywallConfig{
+		FacilitatorURL: facilitator.URL,
+		Requirement:    reqCfg,
+	})
+
+	resource := x402spike.ResourceInfo{
+		URL:      "http://127.0.0.1:8080/v1/chat/completions",
+		MimeType: "application/json",
+	}
+	payload, err := x402spike.BuildPaymentPayload(
+		"0x4f3edf983ac636a65a842ce7c78d9aa706d3b113bce036f4d4dfb6f9e9f5d1d7",
+		reqCfg,
+		resource,
+		time.Now(),
+	)
+	if err != nil {
+		t.Fatalf("BuildPaymentPayload: %v", err)
+	}
+	paymentHeader, err := x402spike.EncodeBase64JSON(payload)
+	if err != nil {
+		t.Fatalf("EncodeBase64JSON: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"llama3.2:latest",
+		"messages":[{"role":"user","content":"hello"}]
+	}`))
+	req.Host = "127.0.0.1:8080"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("PAYMENT-SIGNATURE", paymentHeader)
+	rr := httptest.NewRecorder()
+	p.handleChatCompletions(rr, req)
+	res := rr.Result()
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("status=%d body=%s", res.StatusCode, string(body))
+	}
+	if got := res.Header.Get("PAYMENT-RESPONSE"); got == "" {
+		t.Fatalf("expected PAYMENT-RESPONSE header")
+	}
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "paid ok") {
+		t.Fatalf("expected paid response body, got: %s", string(body))
 	}
 }

@@ -18,14 +18,15 @@ import (
 )
 
 type OpenAIProxy struct {
-	listenAddr string
-	ollamaBase string
-	reg        *registry.Registry
-	remoteChat RemoteChatFunc
-	remoteStreamChat RemoteStreamChatFunc
-	peerLatency PeerLatencyFunc
-	firstTokenTimeout time.Duration
+	listenAddr          string
+	ollamaBase          string
+	reg                 *registry.Registry
+	remoteChat          RemoteChatFunc
+	remoteStreamChat    RemoteStreamChatFunc
+	peerLatency         PeerLatencyFunc
+	firstTokenTimeout   time.Duration
 	totalRequestTimeout time.Duration
+	chatPaywall         *X402PaywallConfig
 }
 
 const maxRemoteRetries = 2
@@ -55,10 +56,10 @@ type PeerLatencyFunc func(context.Context, string) (time.Duration, error)
 // returns peers learned from gossip health messages.
 func NewOpenAIProxy(listenAddr, ollamaBase string, reg *registry.Registry) *OpenAIProxy {
 	return &OpenAIProxy{
-		listenAddr: listenAddr,
-		ollamaBase: strings.TrimRight(ollamaBase, "/"),
-		reg:        reg,
-		firstTokenTimeout: 30 * time.Second,
+		listenAddr:          listenAddr,
+		ollamaBase:          strings.TrimRight(ollamaBase, "/"),
+		reg:                 reg,
+		firstTokenTimeout:   30 * time.Second,
 		totalRequestTimeout: 120 * time.Second,
 	}
 }
@@ -207,6 +208,9 @@ func (p *OpenAIProxy) handleModels(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+	if !p.enforceChatPayment(w, r) {
+		return
+	}
 	if ct := r.Header.Get("Content-Type"); !strings.Contains(strings.ToLower(ct), "application/json") {
 		_ = writeJSON(w, http.StatusUnsupportedMediaType, openAIError(http.StatusUnsupportedMediaType, "expected application/json body"))
 		return
@@ -338,14 +342,14 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 	failure := ""
 	defer func() {
 		p.logRequest(map[string]any{
-			"event":      "inference_request",
-			"stream":     true,
-			"model":      oreq.Model,
-			"node_id":    selectedNode,
-			"latency_ms": time.Since(started).Milliseconds(),
+			"event":       "inference_request",
+			"stream":      true,
+			"model":       oreq.Model,
+			"node_id":     selectedNode,
+			"latency_ms":  time.Since(started).Milliseconds(),
 			"tokens_used": tokensUsed,
-			"ok":         success,
-			"error":      failure,
+			"ok":          success,
+			"error":       failure,
 		})
 	}()
 	reqCtx, cancel := context.WithTimeout(r.Context(), p.totalRequestTimeout)

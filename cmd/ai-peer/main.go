@@ -10,8 +10,8 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"sort"
 	"slices"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -23,6 +23,7 @@ import (
 	"github.com/mrostamii/ai-peer/pkg/gateway"
 	"github.com/mrostamii/ai-peer/pkg/node"
 	"github.com/mrostamii/ai-peer/pkg/registry"
+	"github.com/mrostamii/ai-peer/pkg/x402spike"
 )
 
 func main() {
@@ -191,6 +192,14 @@ func runGatewayStart(args []string) {
 	file := fs.String("file", "./node.yaml", "path to node.yaml")
 	listen := fs.String("listen", "", "gateway listen address override")
 	ollamaBase := fs.String("ollama", "", "ollama base URL override (optional)")
+	x402Enable := fs.Bool("x402-enable", false, "enable x402 payment requirement for /v1/chat/completions")
+	x402Facilitator := fs.String("x402-facilitator", "", "x402 facilitator base URL (e.g. https://x402.org/facilitator)")
+	x402Network := fs.String("x402-network", "eip155:84532", "x402 network in CAIP-2 format")
+	x402Asset := fs.String("x402-asset", "0x036CbD53842c5426634e7929541eC2318f3dCF7e", "x402 payment asset address")
+	x402Amount := fs.String("x402-amount", "10000", "x402 payment amount in token atomic units")
+	x402PayTo := fs.String("x402-payto", "", "x402 recipient wallet address")
+	x402TokenName := fs.String("x402-token-name", "USDC", "x402 token name for EIP-712 domain")
+	x402TokenVersion := fs.String("x402-token-version", "2", "x402 token version for EIP-712 domain")
 	_ = fs.Parse(args)
 
 	cfg, err := config.Load(*file)
@@ -301,6 +310,32 @@ func runGatewayStart(args []string) {
 		time.Duration(cfg.Timeouts.FirstTokenSec)*time.Second,
 		time.Duration(cfg.Timeouts.TotalRequestSec)*time.Second,
 	)
+	if *x402Enable {
+		if strings.TrimSpace(*x402PayTo) == "" {
+			log.Fatalf("x402 enabled but -x402-payto is empty")
+		}
+		proxy.SetX402ChatPaywall(&gateway.X402PaywallConfig{
+			FacilitatorURL: strings.TrimSpace(*x402Facilitator),
+			Requirement: x402spike.PaymentRequirements{
+				Scheme:            "exact",
+				Network:           strings.TrimSpace(*x402Network),
+				Amount:            strings.TrimSpace(*x402Amount),
+				Asset:             strings.TrimSpace(*x402Asset),
+				PayTo:             strings.TrimSpace(*x402PayTo),
+				MaxTimeoutSeconds: 60,
+				Extra: map[string]any{
+					"name":    strings.TrimSpace(*x402TokenName),
+					"version": strings.TrimSpace(*x402TokenVersion),
+				},
+			},
+		})
+		log.Printf("x402 paywall enabled for /v1/chat/completions network=%s amount=%s asset=%s payto=%s facilitator=%s",
+			strings.TrimSpace(*x402Network),
+			strings.TrimSpace(*x402Amount),
+			strings.TrimSpace(*x402Asset),
+			strings.TrimSpace(*x402PayTo),
+			strings.TrimSpace(*x402Facilitator))
+	}
 	proxy.SetRemoteChatFunc(buildRemoteChatFunc(rt, cfg))
 	proxy.SetRemoteStreamChatFunc(buildRemoteStreamChatFunc(rt, cfg))
 	proxy.SetPeerLatencyFunc(func(ctx context.Context, nodeID string) (time.Duration, error) {

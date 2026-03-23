@@ -52,3 +52,26 @@ go run ./cmd/spike-x402-provider \
 ```
 
 When `-facilitator` is omitted, provider still validates protocol flow but returns a local placeholder transaction value (`0xspike-local-no-facilitator`) and does not broadcast on chain.
+
+## Gateway Integration (ai-peer)
+
+`ai-peer gateway start` now supports an optional x402 paywall for `POST /v1/chat/completions`.
+
+Example:
+
+```bash
+go run ./cmd/ai-peer gateway start -file ./node.yaml \
+  -x402-enable \
+  -x402-facilitator https://x402.org/facilitator \
+  -x402-network eip155:84532 \
+  -x402-asset 0x036CbD53842c5426634e7929541eC2318f3dCF7e \
+  -x402-amount 10000 \
+  -x402-payto 0x209693Bc6afc0C5328bA36FaF03C514EF312287C \
+  -x402-token-name USDC \
+  -x402-token-version 2
+```
+
+When enabled:
+
+- requests without `PAYMENT-SIGNATURE` get `402` + `PAYMENT-REQUIRED`
+- valid paid retries proceed to inference and receive `PAYMENT-RESPONSE`
