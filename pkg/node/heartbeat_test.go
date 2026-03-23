@@ -23,7 +23,7 @@ func TestBuildHealthUpdate(t *testing.T) {
 	now := time.Unix(1710000000, 0)
 	started := now.Add(-75 * time.Second)
 	models := []string{"qwen2.5:3b", "llama3.2:latest"}
-	msg, err := buildHealthUpdate("peer-1", models, started, now)
+	msg, err := buildHealthUpdate("peer-1", models, started, now, 0.75, 42)
 	if err != nil {
 		t.Fatalf("buildHealthUpdate() error = %v", err)
 	}
@@ -38,8 +38,8 @@ func TestBuildHealthUpdate(t *testing.T) {
 	if out.UptimeSec != 75 {
 		t.Fatalf("unexpected uptime sec: %d", out.UptimeSec)
 	}
-	if out.Load != 0 || out.LatencyMs != 0 {
-		t.Fatalf("expected default load/latency to be 0, got load=%f latency=%d", out.Load, out.LatencyMs)
+	if out.Load != 0.75 || out.LatencyMs != 42 {
+		t.Fatalf("expected load=0.75 latency=42, got load=%f latency=%d", out.Load, out.LatencyMs)
 	}
 	if len(out.Models) != 2 || out.Models[0] != "qwen2.5:3b" || out.Models[1] != "llama3.2:latest" {
 		t.Fatalf("unexpected models: %v", out.Models)
@@ -50,7 +50,7 @@ func TestBuildHealthUpdateNilModels(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1710000000, 0)
 	started := now.Add(-10 * time.Second)
-	msg, err := buildHealthUpdate("peer-2", nil, started, now)
+	msg, err := buildHealthUpdate("peer-2", nil, started, now, 0, 0)
 	if err != nil {
 		t.Fatalf("buildHealthUpdate() error = %v", err)
 	}
@@ -69,7 +69,7 @@ func TestPublishHealthUpdate(t *testing.T) {
 	pub := &mockPublisher{}
 	now := time.Unix(1710000000, 0)
 	started := now.Add(-10 * time.Second)
-	if err := publishHealthUpdate(context.Background(), pub, "peer-1", []string{"mistral:7b"}, started, now); err != nil {
+	if err := publishHealthUpdate(context.Background(), pub, "peer-1", []string{"mistral:7b"}, started, now, 0.5, 18); err != nil {
 		t.Fatalf("publishHealthUpdate() error = %v", err)
 	}
 	if len(pub.payloads) != 1 {
@@ -81,5 +81,31 @@ func TestPublishHealthUpdate(t *testing.T) {
 	}
 	if len(out.Models) != 1 || out.Models[0] != "mistral:7b" {
 		t.Fatalf("expected [mistral:7b], got %v", out.Models)
+	}
+	if out.Load != 0.5 || out.LatencyMs != 18 {
+		t.Fatalf("expected load=0.5 latency=18, got load=%f latency=%d", out.Load, out.LatencyMs)
+	}
+}
+
+func TestRuntimeHealthSnapshotReflectsInferenceStats(t *testing.T) {
+	t.Parallel()
+	var r Runtime
+	started := r.markInferenceStarted()
+	load, latency := r.healthSnapshot()
+	if load != 1 {
+		t.Fatalf("expected in-flight load 1, got %f", load)
+	}
+	if latency != 0 {
+		t.Fatalf("expected zero latency before completion, got %d", latency)
+	}
+
+	time.Sleep(2 * time.Millisecond)
+	r.markInferenceFinished(started)
+	load, latency = r.healthSnapshot()
+	if load != 0 {
+		t.Fatalf("expected load 0 after completion, got %f", load)
+	}
+	if latency <= 0 {
+		t.Fatalf("expected positive latency after completion, got %d", latency)
 	}
 }

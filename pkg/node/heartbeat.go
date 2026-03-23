@@ -33,7 +33,7 @@ func (p *gossipsubPublisher) Publish(ctx context.Context, data []byte) error {
 	return p.topic.Publish(ctx, data)
 }
 
-func buildHealthUpdate(nodeID string, models []string, startedAt, now time.Time) ([]byte, error) {
+func buildHealthUpdate(nodeID string, models []string, startedAt, now time.Time, load float64, latencyMs int64) ([]byte, error) {
 	uptime := now.Sub(startedAt)
 	if uptime < 0 {
 		uptime = 0
@@ -41,16 +41,16 @@ func buildHealthUpdate(nodeID string, models []string, startedAt, now time.Time)
 	msg := HealthUpdate{
 		NodeID:      nodeID,
 		UptimeSec:   int64(uptime / time.Second),
-		Load:        0,
-		LatencyMs:   0,
+		Load:        load,
+		LatencyMs:   latencyMs,
 		TimestampMs: now.UnixMilli(),
 		Models:      models,
 	}
 	return json.Marshal(msg)
 }
 
-func publishHealthUpdate(ctx context.Context, pub healthPublisher, nodeID string, models []string, startedAt, now time.Time) error {
-	payload, err := buildHealthUpdate(nodeID, models, startedAt, now)
+func publishHealthUpdate(ctx context.Context, pub healthPublisher, nodeID string, models []string, startedAt, now time.Time, load float64, latencyMs int64) error {
+	payload, err := buildHealthUpdate(nodeID, models, startedAt, now, load, latencyMs)
 	if err != nil {
 		return err
 	}
@@ -58,7 +58,8 @@ func publishHealthUpdate(ctx context.Context, pub healthPublisher, nodeID string
 }
 
 func (r *Runtime) healthHeartbeatLoop(ctx context.Context, interval time.Duration, pub healthPublisher, models []string) {
-	if err := publishHealthUpdate(ctx, pub, r.host.ID().String(), models, r.startedAt, time.Now()); err != nil {
+	load, latencyMs := r.healthSnapshot()
+	if err := publishHealthUpdate(ctx, pub, r.host.ID().String(), models, r.startedAt, time.Now(), load, latencyMs); err != nil {
 		log.Printf("health heartbeat warning: %v", err)
 	}
 
@@ -69,7 +70,8 @@ func (r *Runtime) healthHeartbeatLoop(ctx context.Context, interval time.Duratio
 		case <-ctx.Done():
 			return
 		case now := <-t.C:
-			if err := publishHealthUpdate(ctx, pub, r.host.ID().String(), models, r.startedAt, now); err != nil {
+			load, latencyMs := r.healthSnapshot()
+			if err := publishHealthUpdate(ctx, pub, r.host.ID().String(), models, r.startedAt, now, load, latencyMs); err != nil {
 				log.Printf("health heartbeat warning: %v", err)
 			}
 		}

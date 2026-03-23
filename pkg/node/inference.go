@@ -32,6 +32,8 @@ type streamInferenceBackend interface {
 func (r *Runtime) registerInferenceHandler(backend inferenceBackend) {
 	r.host.SetStreamHandler(InferenceProtocolID, func(s network.Stream) {
 		defer s.Close()
+		inferStarted := r.markInferenceStarted()
+		defer r.markInferenceFinished(inferStarted)
 		var req apiv1.InferenceRequest
 		if err := json.NewDecoder(io.LimitReader(s, 4<<20)).Decode(&req); err != nil {
 			_ = json.NewEncoder(s).Encode(&apiv1.InferenceResponse{
@@ -60,6 +62,8 @@ func (r *Runtime) registerInferenceHandler(backend inferenceBackend) {
 func (r *Runtime) registerInferenceStreamHandler(backend streamInferenceBackend) {
 	r.host.SetStreamHandler(InferenceStreamProtocolID, func(s network.Stream) {
 		defer s.Close()
+		inferStarted := r.markInferenceStarted()
+		defer r.markInferenceFinished(inferStarted)
 		var req apiv1.InferenceRequest
 		if err := json.NewDecoder(io.LimitReader(s, 4<<20)).Decode(&req); err != nil {
 			_ = json.NewEncoder(s).Encode(&apiv1.InferenceStreamChunk{

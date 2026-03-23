@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"strings"
 	"time"
 
@@ -32,6 +34,11 @@ type Runtime struct {
 	reconnect  bool
 	startedAt  time.Time
 	metricsSrv *http.Server
+
+	inflightInference atomic.Int64
+	statsMu           sync.RWMutex
+	latencyEMAms      float64
+	hasLatencySample  bool
 }
 
 func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
