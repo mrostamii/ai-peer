@@ -5,17 +5,21 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"strings"
 	"time"
 
 	libp2p "github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
+	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	noise "github.com/libp2p/go-libp2p/p2p/security/noise"
+	ping "github.com/libp2p/go-libp2p/p2p/protocol/ping"
 	ma "github.com/multiformats/go-multiaddr"
 
+	"github.com/mrostamii/ai-peer/pkg/backend/ollama"
 	"github.com/mrostamii/ai-peer/pkg/config"
 )
 
@@ -26,9 +30,11 @@ type Runtime struct {
 	dht        *dht.IpfsDHT
 	bootstraps []peer.AddrInfo
 	reconnect  bool
+	startedAt  time.Time
+	metricsSrv *http.Server
 }
 
-func Start(ctx context.Context, cfg *config.Config) (*Runtime, error) {
+func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 	useCustomBootstraps := len(cfg.Network.BootstrapPeers) > 0
 	var bootstraps []peer.AddrInfo
 	var err error
@@ -45,20 +51,37 @@ func Start(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 
 	listenTCP := fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", cfg.Listen.TCPPort)
 	listenQUIC := fmt.Sprintf("/ip4/0.0.0.0/udp/%d/quic-v1", cfg.Listen.QUICPort)
-	h, err := libp2p.New(
+
+	dhtMode := dht.ModeServer
+	if cfg.Listen.TCPPort == 0 && cfg.Listen.QUICPort == 0 {
+		dhtMode = dht.ModeClient
+	}
+
+	opts := []libp2p.Option{
 		libp2p.ListenAddrStrings(listenTCP, listenQUIC),
 		libp2p.Security(noise.ID, noise.New),
 		libp2p.ResourceManager(&network.NullResourceManager{}),
 		libp2p.EnableRelay(),
 		libp2p.EnableHolePunching(),
 		libp2p.NATPortMap(),
-	)
+		libp2p.EnableNATService(),
+		libp2p.EnableAutoNATv2(),
+	}
+	if cfg.Node.IdentityKeyFile != "" {
+		key, err := loadOrCreateIdentity(cfg.Node.IdentityKeyFile)
+		if err != nil {
+			return nil, err
+		}
+		opts = append(opts, libp2p.Identity(key))
+	}
+
+	h, err := libp2p.New(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("create libp2p host: %w", err)
 	}
 
 	kdht, err := dht.New(ctx, h,
-		dht.Mode(dht.ModeServer),
+		dht.Mode(dhtMode),
 		dht.BootstrapPeers(bootstraps...),
 	)
 	if err != nil {
@@ -77,14 +100,52 @@ func Start(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 		dht:        kdht,
 		bootstraps: bootstraps,
 		reconnect:  useCustomBootstraps,
+		startedAt:  time.Now(),
+	}
+	return r, nil
+}
+
+func Start(ctx context.Context, cfg *config.Config) (*Runtime, error) {
+	r, err := startBase(ctx, cfg)
+	if err != nil {
+		return nil, err
 	}
 	r.logDialAddrs()
+
 	if r.reconnect {
 		go r.bootstrapReconnectLoop(ctx)
 	} else {
 		log.Printf("default DHT bootstrap mode: reconnect loop disabled")
 	}
+	if cfg.Metrics.Enabled {
+		metricsSrv, err := startMetricsServer(ctx, cfg.Metrics.Listen)
+		if err != nil {
+			_ = r.dht.Close()
+			_ = r.host.Close()
+			return nil, err
+		}
+		r.metricsSrv = metricsSrv
+	}
+	hw := DetectHardware()
+	go r.advertiseCapabilitiesLoop(ctx, cfg.Models.Advertised, hw, "0")
+	r.registerInferenceHandler(ollama.New(cfg.Backend.BaseURL))
+	r.registerInferenceStreamHandler(ollama.New(cfg.Backend.BaseURL))
+	ps, err := pubsub.NewGossipSub(ctx, r.host)
+	if err != nil {
+		log.Printf("health heartbeat disabled: init gossipsub failed: %v", err)
+		return r, nil
+	}
+	healthTopic, err := ps.Join(HealthTopicID)
+	if err != nil {
+		log.Printf("health heartbeat disabled: join topic %q failed: %v", HealthTopicID, err)
+		return r, nil
+	}
+	go r.healthHeartbeatLoop(ctx, time.Duration(cfg.Heartbeat.IntervalSec)*time.Second, &gossipsubPublisher{topic: healthTopic}, cfg.Models.Advertised)
 	return r, nil
+}
+
+func StartQueryOnly(ctx context.Context, cfg *config.Config) (*Runtime, error) {
+	return startBase(ctx, cfg)
 }
 
 func (r *Runtime) Close() error {
@@ -92,6 +153,11 @@ func (r *Runtime) Close() error {
 	if r.dht != nil {
 		if err := r.dht.Close(); err != nil {
 			errs = append(errs, "dht close: "+err.Error())
+		}
+	}
+	if r.metricsSrv != nil {
+		if err := stopMetricsServer(r.metricsSrv); err != nil {
+			errs = append(errs, err.Error())
 		}
 	}
 	if r.host != nil {
@@ -168,4 +234,42 @@ func ParseBootstrapPeers(raw []string) ([]peer.AddrInfo, error) {
 		out = append(out, *info)
 	}
 	return out, nil
+}
+
+func (r *Runtime) ConnectBootstrapsOnce(ctx context.Context) {
+	r.connectBootstraps(ctx, false)
+}
+
+func (r *Runtime) ConnectedPeers() []peer.AddrInfo {
+	if r.host == nil {
+		return nil
+	}
+	peers := r.host.Network().Peers()
+	out := make([]peer.AddrInfo, 0, len(peers))
+	for _, id := range peers {
+		out = append(out, peer.AddrInfo{
+			ID:    id,
+			Addrs: r.host.Peerstore().Addrs(id),
+		})
+	}
+	return out
+}
+
+func (r *Runtime) PingPeer(ctx context.Context, target peer.ID) (time.Duration, error) {
+	if r.host == nil {
+		return 0, fmt.Errorf("host not initialized")
+	}
+	ch := ping.Ping(ctx, r.host, target)
+	select {
+	case res, ok := <-ch:
+		if !ok {
+			return 0, fmt.Errorf("ping channel closed")
+		}
+		if res.Error != nil {
+			return 0, res.Error
+		}
+		return res.RTT, nil
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
 }

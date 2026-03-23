@@ -1,5 +1,6 @@
 node:
   name: "ovh-lon-1"
+  identity_key_file: "./data/node_identity.key" # persist peer ID across restarts
 
 listen:
   tcp_port: 4001

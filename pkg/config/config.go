@@ -18,7 +18,8 @@ const (
 
 type Config struct {
 	Node struct {
-		Name string `yaml:"name"`
+		Name            string `yaml:"name"`
+		IdentityKeyFile string `yaml:"identity_key_file"`
 	} `yaml:"node"`
 
 	Listen struct {

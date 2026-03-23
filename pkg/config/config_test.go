@@ -13,6 +13,7 @@ func TestLoadValidConfig(t *testing.T) {
 	p := filepath.Join(d, "node.yaml")
 	err := os.WriteFile(p, []byte(`node:
   name: "ovh-lon-1"
+  identity_key_file: "./data/node_identity.key"
 listen:
   tcp_port: 4001
   quic_port: 4001
@@ -36,6 +37,9 @@ models:
 	}
 	if cfg.Listen.TCPPort != 4001 || cfg.Listen.QUICPort != 4001 {
 		t.Fatalf("unexpected ports: %+v", cfg.Listen)
+	}
+	if cfg.Node.IdentityKeyFile != "./data/node_identity.key" {
+		t.Fatalf("identity key file not loaded: %q", cfg.Node.IdentityKeyFile)
 	}
 	if cfg.Heartbeat.IntervalSec != 30 || cfg.Timeouts.FirstTokenSec != 30 || cfg.Timeouts.TotalRequestSec != 120 {
 		t.Fatalf("defaults not applied: heartbeat=%d first=%d total=%d", cfg.Heartbeat.IntervalSec, cfg.Timeouts.FirstTokenSec, cfg.Timeouts.TotalRequestSec)
