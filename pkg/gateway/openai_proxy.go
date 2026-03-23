@@ -333,6 +333,7 @@ func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http.Request, oreq *openAIChatRequest) {
 	started := time.Now()
 	selectedNode := ""
+	tokensUsed := int64(0)
 	success := false
 	failure := ""
 	defer func() {
@@ -342,6 +343,7 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 			"model":      oreq.Model,
 			"node_id":    selectedNode,
 			"latency_ms": time.Since(started).Milliseconds(),
+			"tokens_used": tokensUsed,
 			"ok":         success,
 			"error":      failure,
 		})
@@ -531,6 +533,7 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 	}
 	firstFinish := any(nil)
 	if first.Done {
+		tokensUsed = int64(first.PromptEvalCount + first.EvalCount)
 		firstFinish = "stop"
 	}
 	firstChunk = false
@@ -565,6 +568,7 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 		}
 		finishReason := any(nil)
 		if chunk.Done {
+			tokensUsed = int64(chunk.PromptEvalCount + chunk.EvalCount)
 			finishReason = "stop"
 		}
 		firstChunk = false
@@ -677,7 +681,9 @@ type ollamaStreamResponse struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
 	} `json:"message"`
-	Done bool `json:"done"`
+	PromptEvalCount int  `json:"prompt_eval_count"`
+	EvalCount       int  `json:"eval_count"`
+	Done            bool `json:"done"`
 }
 
 func toOllamaChatBody(req *openAIChatRequest) map[string]any {

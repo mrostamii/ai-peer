@@ -1,10 +1,12 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -64,6 +66,47 @@ func TestHandleChatCompletionsStream(t *testing.T) {
 	}
 	if !strings.Contains(s, "data: [DONE]") {
 		t.Fatalf("expected [DONE] marker, got: %s", s)
+	}
+}
+
+func TestHandleChatCompletionsStreamLogsTokensUsed(t *testing.T) {
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/chat" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"model":"llama3.2:latest","message":{"role":"assistant","content":"hello"},"done":false}` + "\n"))
+		_, _ = w.Write([]byte(`{"model":"llama3.2:latest","message":{"role":"assistant","content":""},"done":true,"prompt_eval_count":5,"eval_count":2}` + "\n"))
+	}))
+	defer ollama.Close()
+
+	p := NewOpenAIProxy("127.0.0.1:0", ollama.URL, nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"llama3.2:latest",
+		"messages":[{"role":"user","content":"say hello"}],
+		"stream":true
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	var logs bytes.Buffer
+	prevWriter := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(prevWriter)
+
+	p.handleChatCompletions(rr, req)
+	res := rr.Result()
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", res.StatusCode)
+	}
+
+	logOut := logs.String()
+	if !strings.Contains(logOut, `"event":"inference_request"`) || !strings.Contains(logOut, `"stream":true`) {
+		t.Fatalf("expected inference_request stream log, got: %s", logOut)
+	}
+	if !strings.Contains(logOut, `"tokens_used":7`) {
+		t.Fatalf("expected tokens_used in stream log, got: %s", logOut)
 	}
 }
 
