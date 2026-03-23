@@ -89,7 +89,9 @@ func (r *Runtime) registerInferenceStreamHandler(backend streamInferenceBackend)
 				Message struct {
 					Content string `json:"content"`
 				} `json:"message"`
-				Done bool `json:"done"`
+				PromptEvalCount int  `json:"prompt_eval_count"`
+				EvalCount       int  `json:"eval_count"`
+				Done            bool `json:"done"`
 			}
 			if err := dec.Decode(&chunk); err != nil {
 				if err == io.EOF {
@@ -112,6 +114,7 @@ func (r *Runtime) registerInferenceStreamHandler(backend streamInferenceBackend)
 				RequestId: req.GetRequestId(),
 				Model:     chunk.Model,
 				Content:   chunk.Message.Content,
+				TokensUsed: int64(chunk.PromptEvalCount + chunk.EvalCount),
 				Done:      chunk.Done,
 				Ok:        true,
 			}); err != nil {

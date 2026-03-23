@@ -421,6 +421,7 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 				return
 			}
 			if first.GetDone() {
+				tokensUsed = first.GetTokensUsed()
 				success = true
 				_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 				flusher.Flush()
@@ -451,6 +452,7 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 				}
 				finishReason := any(nil)
 				if chunk.GetDone() {
+					tokensUsed = chunk.GetTokensUsed()
 					finishReason = "stop"
 				}
 				firstChunk = false

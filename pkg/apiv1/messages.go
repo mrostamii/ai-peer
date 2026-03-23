@@ -209,6 +209,7 @@ type InferenceStreamChunk struct {
 	RequestId    string
 	Model        string
 	Content      string
+	TokensUsed   int64
 	Done         bool
 	Ok           bool
 	ErrorMessage string
@@ -233,6 +234,13 @@ func (m *InferenceStreamChunk) GetContent() string {
 		return ""
 	}
 	return m.Content
+}
+
+func (m *InferenceStreamChunk) GetTokensUsed() int64 {
+	if m == nil {
+		return 0
+	}
+	return m.TokensUsed
 }
 
 func (m *InferenceStreamChunk) GetDone() bool {

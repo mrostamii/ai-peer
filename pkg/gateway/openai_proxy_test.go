@@ -279,6 +279,60 @@ func TestHandleChatCompletionsStreamUsesRemoteNode(t *testing.T) {
 	}
 }
 
+func TestHandleChatCompletionsStreamUsesRemoteNodeLogsTokensUsed(t *testing.T) {
+	reg := registry.New(time.Minute)
+	now := time.Now().UnixMilli()
+	_ = reg.ApplyHealthJSON([]byte(fmt.Sprintf(`{"node_id":"peer-remote","uptime_sec":1,"timestamp_ms":%d}`, now)))
+	_ = reg.ApplyNodeAnnounceProto(&apiv1.NodeAnnounce{
+		NodeId:      "peer-remote",
+		Models:      []string{"llama3.2:latest"},
+		TimestampMs: now,
+	})
+	p := NewOpenAIProxy("127.0.0.1:0", "http://127.0.0.1:1", reg)
+	p.SetRemoteStreamChatFunc(func(_ context.Context, nodeID string, req *RemoteChatRequest) (io.ReadCloser, error) {
+		if nodeID != "peer-remote" {
+			t.Fatalf("nodeID=%q want peer-remote", nodeID)
+		}
+		if req.Model != "llama3.2:latest" || len(req.Messages) != 1 || req.Messages[0].Content != "hello" {
+			t.Fatalf("unexpected remote req: %+v", req)
+		}
+		raw := `{"model":"llama3.2:latest","content":"from-remote","done":false,"ok":true}` + "\n" +
+			`{"model":"llama3.2:latest","done":true,"ok":true,"TokensUsed":11}` + "\n"
+		return io.NopCloser(strings.NewReader(raw)), nil
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"llama3.2:latest",
+		"messages":[{"role":"user","content":"hello"}],
+		"stream":true
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	var logs bytes.Buffer
+	prevWriter := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(prevWriter)
+
+	p.handleChatCompletions(rr, req)
+	res := rr.Result()
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", res.StatusCode)
+	}
+
+	logOut := logs.String()
+	if !strings.Contains(logOut, `"event":"inference_request"`) || !strings.Contains(logOut, `"stream":true`) {
+		t.Fatalf("expected inference_request stream log, got: %s", logOut)
+	}
+	if !strings.Contains(logOut, `"node_id":"peer-remote"`) {
+		t.Fatalf("expected remote node in log, got: %s", logOut)
+	}
+	if !strings.Contains(logOut, `"tokens_used":11`) {
+		t.Fatalf("expected tokens_used=11 in stream log, got: %s", logOut)
+	}
+}
+
 func TestHandleChatCompletionsRetriesNextBestNode(t *testing.T) {
 	t.Parallel()
 	reg := registry.New(time.Minute)
