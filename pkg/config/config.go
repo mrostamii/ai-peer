@@ -14,6 +14,8 @@ const (
 	defaultFirstTokenSec        = 30
 	defaultTotalRequestSec      = 120
 	defaultGatewayListenAddr    = "127.0.0.1:8080"
+	defaultBackendType          = "ollama"
+	defaultBackendBaseURL       = "http://127.0.0.1:11434"
 	defaultX402Network          = "eip155:84532"
 	defaultX402Asset            = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
 	defaultX402TokenName        = "USDC"
@@ -45,7 +47,9 @@ type Config struct {
 	} `yaml:"listen"`
 
 	Network struct {
-		BootstrapPeers []string `yaml:"bootstrap_peers"`
+		BootstrapPeers      []string `yaml:"bootstrap_peers"`
+		DisableNATTraversal bool     `yaml:"disable_nat_traversal"`
+		EnableRelayService  bool     `yaml:"enable_relay_service"`
 	} `yaml:"network"`
 
 	Backend struct {
@@ -120,6 +124,12 @@ func (c *Config) applyDefaults() {
 	if c.Gateway.Listen == "" {
 		c.Gateway.Listen = defaultGatewayListenAddr
 	}
+	if c.Backend.Type == "" {
+		c.Backend.Type = defaultBackendType
+	}
+	if c.Backend.BaseURL == "" {
+		c.Backend.BaseURL = defaultBackendBaseURL
+	}
 	if c.Node.X402.Network == "" {
 		c.Node.X402.Network = defaultX402Network
 	}
@@ -169,9 +179,6 @@ func (c *Config) Validate() error {
 	}
 	if _, err := url.ParseRequestURI(c.Backend.BaseURL); err != nil {
 		return fmt.Errorf("backend.base_url is invalid: %w", err)
-	}
-	if len(c.Models.Advertised) == 0 {
-		return fmt.Errorf("models.advertised must contain at least one model")
 	}
 	if c.Heartbeat.IntervalSec <= 0 {
 		return fmt.Errorf("heartbeat.interval_sec must be > 0")

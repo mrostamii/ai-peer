@@ -50,6 +50,21 @@ type Runtime struct {
 	hasDecodeSample   bool
 }
 
+type natConfig struct {
+	TraversalEnabled    bool
+	RelayServiceEnabled bool
+	AutoRelayEnabled    bool
+}
+
+func resolveNATConfig(cfg *config.Config, bootstrapCount int) natConfig {
+	traversal := !cfg.Network.DisableNATTraversal
+	return natConfig{
+		TraversalEnabled:    traversal,
+		RelayServiceEnabled: cfg.Network.EnableRelayService,
+		AutoRelayEnabled:    traversal && bootstrapCount > 0,
+	}
+}
+
 func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 	useCustomBootstraps := len(cfg.Network.BootstrapPeers) > 0
 	var bootstraps []peer.AddrInfo
@@ -73,15 +88,26 @@ func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 		dhtMode = dht.ModeClient
 	}
 
+	natCfg := resolveNATConfig(cfg, len(bootstraps))
 	opts := []libp2p.Option{
 		libp2p.ListenAddrStrings(listenTCP, listenQUIC),
 		libp2p.Security(noise.ID, noise.New),
 		libp2p.ResourceManager(&network.NullResourceManager{}),
 		libp2p.EnableRelay(),
-		libp2p.EnableHolePunching(),
-		libp2p.NATPortMap(),
-		libp2p.EnableNATService(),
-		libp2p.EnableAutoNATv2(),
+	}
+	if natCfg.TraversalEnabled {
+		opts = append(opts,
+			libp2p.EnableHolePunching(),
+			libp2p.NATPortMap(),
+			libp2p.EnableNATService(),
+			libp2p.EnableAutoNATv2(),
+		)
+	}
+	if natCfg.AutoRelayEnabled {
+		opts = append(opts, libp2p.EnableAutoRelayWithStaticRelays(bootstraps))
+	}
+	if natCfg.RelayServiceEnabled {
+		opts = append(opts, libp2p.EnableRelayService())
 	}
 	if cfg.Node.IdentityKeyFile != "" {
 		key, err := loadOrCreateIdentity(cfg.Node.IdentityKeyFile)
@@ -120,6 +146,8 @@ func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 		paymentDebtByPayer: make(map[string]int64),
 		pendingPayByKey:    make(map[string]pendingInferenceResult),
 	}
+	log.Printf("network nat: traversal=%t auto_relay=%t relay_service=%t bootstrap_candidates=%d",
+		natCfg.TraversalEnabled, natCfg.AutoRelayEnabled, natCfg.RelayServiceEnabled, len(bootstraps))
 	return r, nil
 }
 

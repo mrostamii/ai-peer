@@ -19,6 +19,11 @@ listen:
 
 network:
   bootstrap_peers: []
+  # NAT traversal is enabled by default. Set true only if you need to disable
+  # hole punching / UPnP / AutoNAT for a restricted environment.
+  disable_nat_traversal: false
+  # Optional: allow this node to act as a relay service when publicly reachable.
+  enable_relay_service: false
 
 backend:
   type: "ollama"
