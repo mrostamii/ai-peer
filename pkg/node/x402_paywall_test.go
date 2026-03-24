@@ -66,3 +66,43 @@ func TestEncodeDecodePaymentRequiredEnvelope(t *testing.T) {
 		t.Fatalf("expected payment required header in envelope")
 	}
 }
+
+func TestComputeInferenceRequirementIgnoresLowerClientMaxTokens(t *testing.T) {
+	t.Parallel()
+	paywall := &x402InferencePaywallConfig{
+		Requirement: x402spike.PaymentRequirements{
+			Scheme:  "exact",
+			Network: "eip155:84532",
+			Amount:  "1",
+			Asset:   "asset",
+			PayTo:   "payto",
+		},
+		Pricing: x402PricingConfig{
+			AtomicPer1KTokens:   10000,
+			MinAmountAtomic:     1,
+			DefaultOutputTokens: 512,
+		},
+	}
+	reqNoMax := &apiv1.InferenceRequest{
+		Model: "qwen2.5:3b",
+		Messages: []*apiv1.ChatMessage{
+			{Role: "user", Content: "hello"},
+		},
+		Params: map[string]string{},
+	}
+	reqLowMax := &apiv1.InferenceRequest{
+		Model: "qwen2.5:3b",
+		Messages: []*apiv1.ChatMessage{
+			{Role: "user", Content: "hello"},
+		},
+		Params: map[string]string{
+			inferenceParamMaxTokens: "16",
+		},
+	}
+
+	amountNoMax := computeInferenceRequirement(paywall, reqNoMax).Amount
+	amountLowMax := computeInferenceRequirement(paywall, reqLowMax).Amount
+	if amountNoMax != amountLowMax {
+		t.Fatalf("low client max_tokens should not reduce charged amount, noMax=%s lowMax=%s", amountNoMax, amountLowMax)
+	}
+}

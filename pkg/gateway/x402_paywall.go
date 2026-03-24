@@ -157,6 +157,11 @@ func (p *OpenAIProxy) enforceChatPayment(w http.ResponseWriter, r *http.Request,
 		return false
 	}
 	if !settle.Success {
+		if strings.TrimSpace(settle.ErrorReason) != "" {
+			paymentRequired.Error = "payment settlement failed: " + strings.TrimSpace(settle.ErrorReason)
+		} else {
+			paymentRequired.Error = "payment settlement failed"
+		}
 		p.logRequest(map[string]any{
 			"event":       "x402_payment_rejected",
 			"request_id":  requestID,
@@ -169,7 +174,6 @@ func (p *OpenAIProxy) enforceChatPayment(w http.ResponseWriter, r *http.Request,
 			"latency_ms":  time.Since(started).Milliseconds(),
 			"facilitator": strings.TrimSpace(p.chatPaywall.FacilitatorURL),
 		})
-		paymentRequired.Error = "payment settlement failed"
 		writePaymentRequired(w, paymentRequired, settle)
 		return false
 	}
@@ -203,7 +207,10 @@ func (p *OpenAIProxy) computePaymentRequirement(req *openAIChatRequest) (x402spi
 	inputTokens := estimateInputTokens(req)
 	outputTokens := pricing.DefaultOutputTokens
 	if req != nil && req.MaxTokens != nil && *req.MaxTokens > 0 {
-		outputTokens = int64(*req.MaxTokens)
+		v := int64(*req.MaxTokens)
+		if v > outputTokens {
+			outputTokens = v
+		}
 	}
 	if outputTokens < 0 {
 		outputTokens = 0

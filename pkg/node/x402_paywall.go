@@ -168,7 +168,11 @@ func (r *Runtime) enforceInferencePayment(req *apiv1.InferenceRequest) (string, 
 		return encodePaymentRequiredEnvelope(paymentRequired.Error, paymentRequired, x402spike.SettlementResponse{}), false
 	}
 	if !settle.Success {
-		paymentRequired.Error = "payment settlement failed"
+		if strings.TrimSpace(settle.ErrorReason) != "" {
+			paymentRequired.Error = "payment settlement failed: " + strings.TrimSpace(settle.ErrorReason)
+		} else {
+			paymentRequired.Error = "payment settlement failed"
+		}
 		return encodePaymentRequiredEnvelope(paymentRequired.Error, paymentRequired, settle), false
 	}
 	return "", true
@@ -186,7 +190,10 @@ func computeInferenceRequirement(paywall *x402InferencePaywallConfig, req *apiv1
 	if req != nil && req.GetParams() != nil {
 		if raw := strings.TrimSpace(req.GetParams()[inferenceParamMaxTokens]); raw != "" {
 			if v, err := strconv.ParseInt(raw, 10, 64); err == nil && v > 0 {
-				outputTokens = v
+				// Provider-side baseline prevents clients from forcing very low prepay.
+				if v > outputTokens {
+					outputTokens = v
+				}
 			}
 		}
 	}

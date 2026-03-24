@@ -745,6 +745,7 @@ func runPayChat(args []string) {
 	model := fs.String("model", "qwen2.5:3b", "model name")
 	message := fs.String("message", "say hi", "user message content")
 	stream := fs.Bool("stream", true, "request streaming response")
+	maxTokens := fs.Int("max-tokens", 0, "optional max_tokens sent to provider for pricing/output cap")
 	privateKey := fs.String("private-key", "", "optional private key override")
 	_ = fs.Parse(args)
 
@@ -762,6 +763,9 @@ func runPayChat(args []string) {
 		"messages": []map[string]string{
 			{"role": "user", "content": *message},
 		},
+	}
+	if *maxTokens > 0 {
+		body["max_tokens"] = *maxTokens
 	}
 	raw, err := json.Marshal(body)
 	if err != nil {

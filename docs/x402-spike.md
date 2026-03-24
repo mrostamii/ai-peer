@@ -92,6 +92,7 @@ go run ./cmd/ai-peer pay chat \
   -url http://127.0.0.1:8080/v1/chat/completions \
   -model qwen2.5:3b \
   -message "say hi" \
+  -max-tokens 512 \
   -stream true
 ```
 
