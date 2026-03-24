@@ -144,6 +144,7 @@ func Start(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 	if cfg.Node.X402.Enabled && cfg.Node.X402.PricePer1KAtomic > 0 {
 		pricePer1K = fmt.Sprintf("%d", cfg.Node.X402.PricePer1KAtomic)
 	}
+	modelPricing := buildAdvertisedModelPricing(cfg)
 	go r.advertiseCapabilitiesLoop(ctx, cfg.Models.Advertised, hw, pricePer1K)
 	r.registerInferenceHandler(ollama.New(cfg.Backend.BaseURL))
 	r.registerInferenceStreamHandler(ollama.New(cfg.Backend.BaseURL))
@@ -157,7 +158,7 @@ func Start(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 		log.Printf("health heartbeat disabled: join topic %q failed: %v", HealthTopicID, err)
 		return r, nil
 	}
-	go r.healthHeartbeatLoop(ctx, time.Duration(cfg.Heartbeat.IntervalSec)*time.Second, &gossipsubPublisher{topic: healthTopic}, cfg.Models.Advertised)
+	go r.healthHeartbeatLoop(ctx, time.Duration(cfg.Heartbeat.IntervalSec)*time.Second, &gossipsubPublisher{topic: healthTopic}, cfg.Models.Advertised, modelPricing)
 	return r, nil
 }
 

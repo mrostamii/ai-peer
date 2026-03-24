@@ -23,7 +23,9 @@ func TestBuildHealthUpdate(t *testing.T) {
 	now := time.Unix(1710000000, 0)
 	started := now.Add(-75 * time.Second)
 	models := []string{"qwen2.5:3b", "llama3.2:latest"}
-	msg, err := buildHealthUpdate("peer-1", models, started, now, 0.75, 42, 1800, 21.5)
+	msg, err := buildHealthUpdate("peer-1", models, map[string]ModelPricingHint{
+		"qwen2.5:3b": {PricePer1KAtomic: 10000, MinAmountAtomic: 500},
+	}, started, now, 0.75, 42, 1800, 21.5)
 	if err != nil {
 		t.Fatalf("buildHealthUpdate() error = %v", err)
 	}
@@ -47,13 +49,16 @@ func TestBuildHealthUpdate(t *testing.T) {
 	if len(out.Models) != 2 || out.Models[0] != "qwen2.5:3b" || out.Models[1] != "llama3.2:latest" {
 		t.Fatalf("unexpected models: %v", out.Models)
 	}
+	if out.ModelPricing["qwen2.5:3b"].PricePer1KAtomic != 10000 {
+		t.Fatalf("expected model pricing in heartbeat, got %+v", out.ModelPricing)
+	}
 }
 
 func TestBuildHealthUpdateNilModels(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1710000000, 0)
 	started := now.Add(-10 * time.Second)
-	msg, err := buildHealthUpdate("peer-2", nil, started, now, 0, 0, 0, 0)
+	msg, err := buildHealthUpdate("peer-2", nil, nil, started, now, 0, 0, 0, 0)
 	if err != nil {
 		t.Fatalf("buildHealthUpdate() error = %v", err)
 	}
@@ -72,7 +77,7 @@ func TestPublishHealthUpdate(t *testing.T) {
 	pub := &mockPublisher{}
 	now := time.Unix(1710000000, 0)
 	started := now.Add(-10 * time.Second)
-	if err := publishHealthUpdate(context.Background(), pub, "peer-1", []string{"mistral:7b"}, started, now, 0.5, 18, 700, 33.3); err != nil {
+	if err := publishHealthUpdate(context.Background(), pub, "peer-1", []string{"mistral:7b"}, nil, started, now, 0.5, 18, 700, 33.3); err != nil {
 		t.Fatalf("publishHealthUpdate() error = %v", err)
 	}
 	if len(pub.payloads) != 1 {

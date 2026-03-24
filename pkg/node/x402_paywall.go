@@ -80,6 +80,43 @@ func buildInferencePaywallConfig(cfg *config.Config) *x402InferencePaywallConfig
 	}
 }
 
+func buildAdvertisedModelPricing(cfg *config.Config) map[string]ModelPricingHint {
+	if cfg == nil || !cfg.Node.X402.Enabled || cfg.Node.X402.PricePer1KAtomic <= 0 {
+		return nil
+	}
+	out := make(map[string]ModelPricingHint, len(cfg.Models.Advertised))
+	for _, model := range cfg.Models.Advertised {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			continue
+		}
+		effective := ModelPricingHint{
+			PricePer1KAtomic:    cfg.Node.X402.PricePer1KAtomic,
+			MinAmountAtomic:     cfg.Node.X402.MinAmountAtomic,
+			DefaultOutputTokens: cfg.Node.X402.DefaultOutputTokens,
+		}
+		if perModel, ok := cfg.Models.ModelPricing[model]; ok {
+			if perModel.PricePer1KAtomic > 0 {
+				effective.PricePer1KAtomic = perModel.PricePer1KAtomic
+			}
+			if perModel.MinAmountAtomic > 0 {
+				effective.MinAmountAtomic = perModel.MinAmountAtomic
+			}
+			if perModel.MaxAmountAtomic > 0 {
+				effective.MaxAmountAtomic = perModel.MaxAmountAtomic
+			}
+			if perModel.DefaultOutputTokens > 0 {
+				effective.DefaultOutputTokens = perModel.DefaultOutputTokens
+			}
+		}
+		out[model] = effective
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func (r *Runtime) enforceInferencePayment(req *apiv1.InferenceRequest) (string, bool) {
 	if r == nil || r.inferencePaywall == nil {
 		return "", true

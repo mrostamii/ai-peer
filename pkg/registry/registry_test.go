@@ -40,13 +40,13 @@ func TestNodesForModel(t *testing.T) {
 	r := New(time.Minute, WithClock(func() time.Time { return now }))
 
 	_ = r.ApplyNodeAnnounceProto(&apiv1.NodeAnnounce{
-		NodeId:  "n1",
-		Models:  []string{"llama", "mistral"},
+		NodeId:      "n1",
+		Models:      []string{"llama", "mistral"},
 		TimestampMs: now.UnixMilli(),
 	})
 	_ = r.ApplyNodeAnnounceProto(&apiv1.NodeAnnounce{
-		NodeId:  "n2",
-		Models:  []string{"phi"},
+		NodeId:      "n2",
+		Models:      []string{"phi"},
 		TimestampMs: now.UnixMilli(),
 	})
 
@@ -99,6 +99,24 @@ func TestApplyHealthJSONWithTTFTAndDecodeTPS(t *testing.T) {
 	}
 	if list[0].DecodeTPS != 42.25 {
 		t.Fatalf("decode_tps=%f want 42.25", list[0].DecodeTPS)
+	}
+}
+
+func TestApplyHealthJSONWithModelPricing(t *testing.T) {
+	now := time.Now()
+	r := New(30*time.Second, WithClock(func() time.Time { return now }))
+
+	payload := fmt.Sprintf(`{"node_id":"peer-price","uptime_sec":12,"timestamp_ms":%d,"model_pricing":{"qwen2.5:3b":{"price_per_1k_atomic":10000,"min_amount_atomic":500}}}`, now.UnixMilli())
+	if err := r.ApplyHealthJSON([]byte(payload)); err != nil {
+		t.Fatal(err)
+	}
+	list := r.List()
+	if len(list) != 1 {
+		t.Fatalf("len=%d want 1", len(list))
+	}
+	mp := list[0].ModelPricing["qwen2.5:3b"]
+	if mp.PricePer1KAtomic != 10000 || mp.MinAmountAtomic != 500 {
+		t.Fatalf("unexpected model pricing: %+v", list[0].ModelPricing)
 	}
 }
 
