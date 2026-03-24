@@ -22,6 +22,7 @@ import (
 type OpenAIProxy struct {
 	listenAddr          string
 	ollamaBase          string
+	localBackendEnabled bool
 	reg                 *registry.Registry
 	remoteChat          RemoteChatFunc
 	remoteStreamChat    RemoteStreamChatFunc
@@ -80,10 +81,15 @@ func NewOpenAIProxy(listenAddr, ollamaBase string, reg *registry.Registry) *Open
 	return &OpenAIProxy{
 		listenAddr:          listenAddr,
 		ollamaBase:          strings.TrimRight(ollamaBase, "/"),
+		localBackendEnabled: true,
 		reg:                 reg,
 		firstTokenTimeout:   30 * time.Second,
 		totalRequestTimeout: 120 * time.Second,
 	}
+}
+
+func (p *OpenAIProxy) SetLocalBackendEnabled(enabled bool) {
+	p.localBackendEnabled = enabled
 }
 
 func (p *OpenAIProxy) SetRemoteChatFunc(fn RemoteChatFunc) {
@@ -155,50 +161,51 @@ func (p *OpenAIProxy) handleNetworkNodes(w http.ResponseWriter, _ *http.Request)
 }
 
 func (p *OpenAIProxy) handleModels(w http.ResponseWriter, r *http.Request) {
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, p.ollamaBase+"/api/tags", nil)
-	if err != nil {
-		_ = writeJSON(w, http.StatusInternalServerError, openAIError(http.StatusInternalServerError, err.Error()))
-		return
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		_ = writeJSON(w, http.StatusBadGateway, openAIError(http.StatusBadGateway, err.Error()))
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		_ = writeJSON(w, http.StatusBadGateway, openAIError(http.StatusBadGateway, err.Error()))
-		return
-	}
-	if resp.StatusCode != http.StatusOK {
-		_ = writeJSON(w, http.StatusBadGateway, openAIError(http.StatusBadGateway, string(body)))
-		return
-	}
-
-	var tags struct {
-		Models []struct {
-			Name  string `json:"name"`
-			Model string `json:"model"`
-		} `json:"models"`
-	}
-	if err := json.Unmarshal(body, &tags); err != nil {
-		_ = writeJSON(w, http.StatusBadGateway, openAIError(http.StatusBadGateway, "ollama tags decode: "+err.Error()))
-		return
-	}
-
 	seen := map[string]struct{}{}
-	for _, m := range tags.Models {
-		id := m.Name
-		if id == "" {
-			id = m.Model
+	if p.localBackendEnabled {
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, p.ollamaBase+"/api/tags", nil)
+		if err != nil {
+			_ = writeJSON(w, http.StatusInternalServerError, openAIError(http.StatusInternalServerError, err.Error()))
+			return
 		}
-		id = strings.TrimSpace(id)
-		if id == "" {
-			continue
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			_ = writeJSON(w, http.StatusBadGateway, openAIError(http.StatusBadGateway, err.Error()))
+			return
 		}
-		seen[id] = struct{}{}
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			_ = writeJSON(w, http.StatusBadGateway, openAIError(http.StatusBadGateway, err.Error()))
+			return
+		}
+		if resp.StatusCode != http.StatusOK {
+			_ = writeJSON(w, http.StatusBadGateway, openAIError(http.StatusBadGateway, string(body)))
+			return
+		}
+
+		var tags struct {
+			Models []struct {
+				Name  string `json:"name"`
+				Model string `json:"model"`
+			} `json:"models"`
+		}
+		if err := json.Unmarshal(body, &tags); err != nil {
+			_ = writeJSON(w, http.StatusBadGateway, openAIError(http.StatusBadGateway, "ollama tags decode: "+err.Error()))
+			return
+		}
+		for _, m := range tags.Models {
+			id := m.Name
+			if id == "" {
+				id = m.Model
+			}
+			id = strings.TrimSpace(id)
+			if id == "" {
+				continue
+			}
+			seen[id] = struct{}{}
+		}
 	}
 	if p.reg != nil {
 		for _, rec := range p.reg.List() {
@@ -323,6 +330,11 @@ func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 		}
 	}
 	selectedNode = "local"
+	if !p.localBackendEnabled {
+		failure = "no remote provider available for model"
+		_ = writeJSON(w, http.StatusServiceUnavailable, openAIError(http.StatusServiceUnavailable, failure))
+		return
+	}
 
 	body := toOllamaChatBody(&oreq)
 	raw, err := json.Marshal(body)
@@ -528,6 +540,11 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 		}
 	}
 	selectedNode = "local"
+	if !p.localBackendEnabled {
+		failure = "no remote provider available for model"
+		_ = writeJSON(w, http.StatusServiceUnavailable, openAIError(http.StatusServiceUnavailable, failure))
+		return
+	}
 
 	body := toOllamaChatBody(oreq)
 	raw, err := json.Marshal(body)

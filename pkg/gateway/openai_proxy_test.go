@@ -865,6 +865,47 @@ func TestHandleChatCompletionsReturnsRemotePaymentRequired(t *testing.T) {
 	}
 }
 
+func TestHandleChatCompletionsRemoteOnlyReturnsUnavailable(t *testing.T) {
+	t.Parallel()
+	p := NewOpenAIProxy("127.0.0.1:0", "http://127.0.0.1:1", nil)
+	p.SetLocalBackendEnabled(false)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"llama3.2:latest",
+		"messages":[{"role":"user","content":"hello"}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	p.handleChatCompletions(rr, req)
+	res := rr.Result()
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d want 503", res.StatusCode)
+	}
+}
+
+func TestHandleChatCompletionsStreamRemoteOnlyReturnsUnavailable(t *testing.T) {
+	t.Parallel()
+	p := NewOpenAIProxy("127.0.0.1:0", "http://127.0.0.1:1", nil)
+	p.SetLocalBackendEnabled(false)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"llama3.2:latest",
+		"messages":[{"role":"user","content":"hello"}],
+		"stream":true
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	p.handleChatCompletions(rr, req)
+	res := rr.Result()
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d want 503", res.StatusCode)
+	}
+}
+
 func TestHandleChatCompletionsDoesNotLogPromptOnUpstreamError(t *testing.T) {
 	t.Parallel()
 	const promptSecret = "TOP_SECRET_PROMPT_TEXT_123"

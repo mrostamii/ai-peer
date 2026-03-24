@@ -200,6 +200,7 @@ func runGatewayStart(args []string) {
 	file := fs.String("file", "./node.yaml", "path to node.yaml")
 	listen := fs.String("listen", "", "gateway listen address override")
 	ollamaBase := fs.String("ollama", "", "ollama base URL override (optional)")
+	localBackend := fs.Bool("local-backend", false, "enable local Ollama fallback in gateway (default false: remote-only routing)")
 	x402Mode := fs.String("x402-mode", "off", "x402 mode: off|managed (managed = gateway-owned paywall, off = decentralized routing only)")
 	x402Enable := fs.Bool("x402-enable", false, "enable x402 payment requirement for /v1/chat/completions")
 	x402Facilitator := fs.String("x402-facilitator", "", "x402 facilitator base URL (e.g. https://x402.org/facilitator)")
@@ -318,6 +319,7 @@ func runGatewayStart(args []string) {
 	log.Printf("gateway start: listen=%s ollama=%s p2p=tcp/%d quic/%d (health topic %q)",
 		resolvedListen, resolvedOllama, cfg.Listen.TCPPort, cfg.Listen.QUICPort, node.HealthTopicID)
 	proxy := gateway.NewOpenAIProxy(resolvedListen, resolvedOllama, reg)
+	proxy.SetLocalBackendEnabled(*localBackend)
 	proxy.SetTimeouts(
 		time.Duration(cfg.Timeouts.FirstTokenSec)*time.Second,
 		time.Duration(cfg.Timeouts.TotalRequestSec)*time.Second,
@@ -389,6 +391,11 @@ func runGatewayStart(args []string) {
 			*x402DefaultOutputTokens)
 	} else {
 		log.Printf("x402 gateway paywall mode=off (decentralized routing only)")
+	}
+	if *localBackend {
+		log.Printf("gateway local backend fallback enabled (mode=hybrid)")
+	} else {
+		log.Printf("gateway local backend fallback disabled (mode=remote-only)")
 	}
 	proxy.SetRemoteChatFunc(buildRemoteChatFunc(rt, cfg))
 	proxy.SetRemoteStreamChatFunc(buildRemoteStreamChatFunc(rt, cfg))
