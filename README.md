@@ -40,6 +40,7 @@ The project now provides a working decentralized Ollama network over libp2p with
 - retry logic on node failure
 - heartbeat-based network registry
 - basic CLI operations (`node`, `network`, `gateway`)
+- OpenClaw integration guide (`docs/openclaw.md`, current maturity noted inside)
 
 ### Quick run
 
@@ -66,6 +67,11 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
 ```
 
 **Go modules:** this repo includes a `replace` for `github.com/libp2p/go-libp2p/core` so imports resolve unambiguously to `github.com/libp2p/go-libp2p` v0.48.0 (see `go.mod`).
+
+## OpenClaw integration
+
+- Guide: `docs/openclaw.md`
+- Example provider config: `docs/openclaw.json.example`
 
 ## Repository layout
 
