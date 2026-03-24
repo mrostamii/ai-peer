@@ -55,56 +55,58 @@ func (c *Client) DoWithPayment(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("read request body: %w", err)
 	}
 
-	firstReq, err := cloneRequest(req, body)
-	if err != nil {
-		return nil, err
+	paymentSignature := strings.TrimSpace(req.Header.Get("PAYMENT-SIGNATURE"))
+	var lastResp *http.Response
+	for attempt := 0; attempt < 5; attempt++ {
+		nextReq, err := cloneRequest(req, body)
+		if err != nil {
+			return nil, err
+		}
+		if paymentSignature != "" {
+			nextReq.Header.Set("PAYMENT-SIGNATURE", paymentSignature)
+		}
+		resp, err := httpClient.Do(nextReq)
+		if err != nil {
+			return nil, err
+		}
+		lastResp = resp
+		if resp.StatusCode != http.StatusPaymentRequired {
+			return resp, nil
+		}
+		paymentRequiredHeader := resp.Header.Get("PAYMENT-REQUIRED")
+		if strings.TrimSpace(paymentRequiredHeader) == "" {
+			return resp, nil
+		}
+		var paymentRequired x402spike.PaymentRequired
+		if err := x402spike.DecodeBase64JSON(paymentRequiredHeader, &paymentRequired); err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("decode PAYMENT-REQUIRED: %w", err)
+		}
+		if len(paymentRequired.Accepts) == 0 {
+			resp.Body.Close()
+			return nil, errors.New("PAYMENT-REQUIRED accepts list is empty")
+		}
+		payload, err := x402spike.BuildPaymentPayload(
+			c.PrivateKey,
+			paymentRequired.Accepts[0],
+			paymentRequired.Resource,
+			nowFn(),
+		)
+		if err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("build payment payload: %w", err)
+		}
+		paymentSignature, err = x402spike.EncodeBase64JSON(payload)
+		if err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("encode payment signature: %w", err)
+		}
+		_ = resp.Body.Close()
 	}
-	firstResp, err := httpClient.Do(firstReq)
-	if err != nil {
-		return nil, err
+	if lastResp != nil {
+		return lastResp, nil
 	}
-	if firstResp.StatusCode != http.StatusPaymentRequired {
-		return firstResp, nil
-	}
-
-	paymentRequiredHeader := firstResp.Header.Get("PAYMENT-REQUIRED")
-	if strings.TrimSpace(paymentRequiredHeader) == "" {
-		return firstResp, nil
-	}
-
-	var paymentRequired x402spike.PaymentRequired
-	if err := x402spike.DecodeBase64JSON(paymentRequiredHeader, &paymentRequired); err != nil {
-		firstResp.Body.Close()
-		return nil, fmt.Errorf("decode PAYMENT-REQUIRED: %w", err)
-	}
-	if len(paymentRequired.Accepts) == 0 {
-		firstResp.Body.Close()
-		return nil, errors.New("PAYMENT-REQUIRED accepts list is empty")
-	}
-
-	payload, err := x402spike.BuildPaymentPayload(
-		c.PrivateKey,
-		paymentRequired.Accepts[0],
-		paymentRequired.Resource,
-		nowFn(),
-	)
-	if err != nil {
-		firstResp.Body.Close()
-		return nil, fmt.Errorf("build payment payload: %w", err)
-	}
-	paymentSignature, err := x402spike.EncodeBase64JSON(payload)
-	if err != nil {
-		firstResp.Body.Close()
-		return nil, fmt.Errorf("encode payment signature: %w", err)
-	}
-
-	_ = firstResp.Body.Close()
-	secondReq, err := cloneRequest(req, body)
-	if err != nil {
-		return nil, err
-	}
-	secondReq.Header.Set("PAYMENT-SIGNATURE", paymentSignature)
-	return httpClient.Do(secondReq)
+	return nil, errors.New("payment retry exceeded")
 }
 
 func requestBodyBytes(req *http.Request) ([]byte, error) {

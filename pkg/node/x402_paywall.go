@@ -2,6 +2,8 @@ package node
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -39,6 +41,16 @@ type inferencePaymentSession struct {
 	PriorDebtAtomic int64
 	PrepaidAtomic   int64
 	Pricing         x402PricingConfig
+	PaymentKey      string
+	ResourceURL     string
+	Requirement     x402spike.PaymentRequirements
+	PendingResult   *pendingInferenceResult
+}
+
+type pendingInferenceResult struct {
+	Content    string
+	TokensUsed int64
+	LatencyMs  int64
 }
 
 type x402RemoteErrorEnvelope struct {
@@ -163,14 +175,19 @@ func (r *Runtime) enforceInferencePayment(req *apiv1.InferenceRequest) (*inferen
 		return nil, encodePaymentRequiredEnvelope(paymentRequired.Error, paymentRequired, x402spike.SettlementResponse{}), false
 	}
 	payer := strings.ToLower(strings.TrimSpace(payload.Payload.Authorization.From))
+	paymentKey := makePaymentKey(req, payer)
+	pending, hasPending := r.getPendingInferenceResult(paymentKey)
 	priorDebt := r.getPaymentDebt(payer)
 	requirementWithDebt := requirement
 	if priorDebt > 0 {
-		totalWithDebt := quotedAmount + priorDebt
-		if totalWithDebt < 1 {
-			totalWithDebt = 1
+		requiredAtomic := priorDebt
+		if !hasPending {
+			requiredAtomic += quotedAmount
 		}
-		requirementWithDebt.Amount = strconv.FormatInt(totalWithDebt, 10)
+		if requiredAtomic < 1 {
+			requiredAtomic = 1
+		}
+		requirementWithDebt.Amount = strconv.FormatInt(requiredAtomic, 10)
 		paymentRequired.Accepts = []x402spike.PaymentRequirements{requirementWithDebt}
 	}
 	if err := validateAcceptedPayment(payload.Accepted, requirementWithDebt); err != nil {
@@ -184,12 +201,19 @@ func (r *Runtime) enforceInferencePayment(req *apiv1.InferenceRequest) (*inferen
 	}
 
 	if strings.TrimSpace(paywall.FacilitatorURL) == "" {
+		if hasPending && priorDebt > 0 {
+			r.setPaymentDebt(payer, 0)
+		}
 		return &inferencePaymentSession{
 			Payer:           payer,
 			Model:           strings.TrimSpace(req.GetModel()),
 			PriorDebtAtomic: priorDebt,
 			PrepaidAtomic:   prepaidAtomic,
 			Pricing:         resolveInferencePricing(paywall, req),
+			PaymentKey:      paymentKey,
+			ResourceURL:     resourceURL,
+			Requirement:     requirementWithDebt,
+			PendingResult:   pendingOrNil(pending, hasPending),
 		}, "", true
 	}
 	settle, _, _, err := settleWithFacilitator(paywall.FacilitatorURL, payload, requirementWithDebt)
@@ -205,12 +229,19 @@ func (r *Runtime) enforceInferencePayment(req *apiv1.InferenceRequest) (*inferen
 		}
 		return nil, encodePaymentRequiredEnvelope(paymentRequired.Error, paymentRequired, settle), false
 	}
+	if hasPending && priorDebt > 0 {
+		r.setPaymentDebt(payer, 0)
+	}
 	return &inferencePaymentSession{
 		Payer:           payer,
 		Model:           strings.TrimSpace(req.GetModel()),
 		PriorDebtAtomic: priorDebt,
 		PrepaidAtomic:   prepaidAtomic,
 		Pricing:         resolveInferencePricing(paywall, req),
+		PaymentKey:      paymentKey,
+		ResourceURL:     resourceURL,
+		Requirement:     requirementWithDebt,
+		PendingResult:   pendingOrNil(pending, hasPending),
 	}, "", true
 }
 
@@ -412,6 +443,14 @@ func validateAcceptedPayment(got, want x402spike.PaymentRequirements) error {
 	return nil
 }
 
+func pendingOrNil(v pendingInferenceResult, ok bool) *pendingInferenceResult {
+	if !ok {
+		return nil
+	}
+	cp := v
+	return &cp
+}
+
 func (r *Runtime) getPaymentDebt(payer string) int64 {
 	payer = strings.ToLower(strings.TrimSpace(payer))
 	if r == nil || payer == "" {
@@ -439,6 +478,72 @@ func (r *Runtime) setPaymentDebt(payer string, debt int64) {
 	r.paymentDebtByPayer[payer] = debt
 }
 
+func (r *Runtime) setPendingInferenceResult(key string, result pendingInferenceResult) {
+	key = strings.TrimSpace(key)
+	if r == nil || key == "" {
+		return
+	}
+	r.pendingPayMu.Lock()
+	defer r.pendingPayMu.Unlock()
+	r.pendingPayByKey[key] = result
+}
+
+func (r *Runtime) getPendingInferenceResult(key string) (pendingInferenceResult, bool) {
+	key = strings.TrimSpace(key)
+	if r == nil || key == "" {
+		return pendingInferenceResult{}, false
+	}
+	r.pendingPayMu.Lock()
+	defer r.pendingPayMu.Unlock()
+	v, ok := r.pendingPayByKey[key]
+	return v, ok
+}
+
+func (r *Runtime) deletePendingInferenceResult(key string) {
+	key = strings.TrimSpace(key)
+	if r == nil || key == "" {
+		return
+	}
+	r.pendingPayMu.Lock()
+	defer r.pendingPayMu.Unlock()
+	delete(r.pendingPayByKey, key)
+}
+
+func makePaymentKey(req *apiv1.InferenceRequest, payer string) string {
+	type keyMsg struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	type keyReq struct {
+		Payer    string            `json:"payer"`
+		Model    string            `json:"model"`
+		Messages []keyMsg          `json:"messages"`
+		Params   map[string]string `json:"params"`
+	}
+	out := keyReq{
+		Payer:  strings.ToLower(strings.TrimSpace(payer)),
+		Params: map[string]string{},
+	}
+	if req != nil {
+		out.Model = strings.TrimSpace(req.GetModel())
+		for _, m := range req.GetMessages() {
+			out.Messages = append(out.Messages, keyMsg{
+				Role:    m.GetRole(),
+				Content: m.GetContent(),
+			})
+		}
+		for k, v := range req.GetParams() {
+			if strings.EqualFold(strings.TrimSpace(k), inferenceParamPaymentSignature) {
+				continue
+			}
+			out.Params[k] = v
+		}
+	}
+	raw, _ := json.Marshal(out)
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
 func (r *Runtime) reconcileActualUsage(session *inferencePaymentSession, tokensUsed int64) {
 	if r == nil || session == nil || session.Payer == "" {
 		return
@@ -446,16 +551,7 @@ func (r *Runtime) reconcileActualUsage(session *inferencePaymentSession, tokensU
 	if session.Pricing.AtomicPer1KTokens <= 0 {
 		return
 	}
-	if tokensUsed < 1 {
-		tokensUsed = 1
-	}
-	actualDue := (tokensUsed*session.Pricing.AtomicPer1KTokens + 999) / 1000
-	if session.Pricing.MinAmountAtomic > 0 && actualDue < session.Pricing.MinAmountAtomic {
-		actualDue = session.Pricing.MinAmountAtomic
-	}
-	if actualDue < 1 {
-		actualDue = 1
-	}
+	actualDue := r.computeActualDueAtomic(session, tokensUsed)
 	outstanding := session.PriorDebtAtomic + actualDue - session.PrepaidAtomic
 	if outstanding < 0 {
 		outstanding = 0
@@ -473,4 +569,40 @@ func (r *Runtime) reconcileActualUsage(session *inferencePaymentSession, tokensU
 			"tokens_used":       tokensUsed,
 		})
 	}
+}
+
+func (r *Runtime) computeActualDueAtomic(session *inferencePaymentSession, tokensUsed int64) int64 {
+	if session == nil {
+		return 0
+	}
+	if tokensUsed < 1 {
+		tokensUsed = 1
+	}
+	actualDue := (tokensUsed*session.Pricing.AtomicPer1KTokens + 999) / 1000
+	if session.Pricing.MinAmountAtomic > 0 && actualDue < session.Pricing.MinAmountAtomic {
+		actualDue = session.Pricing.MinAmountAtomic
+	}
+	if actualDue < 1 {
+		actualDue = 1
+	}
+	return actualDue
+}
+
+func (r *Runtime) markAbortedStreamDebt(session *inferencePaymentSession) {
+	if r == nil || session == nil || session.Payer == "" {
+		return
+	}
+	penalty := session.Pricing.MinAmountAtomic
+	if penalty < 1 {
+		penalty = 1
+	}
+	current := r.getPaymentDebt(session.Payer)
+	r.setPaymentDebt(session.Payer, current+penalty)
+	logInferenceEvent(map[string]any{
+		"event":           "x402_stream_aborted_debt",
+		"payer":           session.Payer,
+		"model":           session.Model,
+		"penalty_atomic":  penalty,
+		"new_debt_atomic": current + penalty,
+	})
 }

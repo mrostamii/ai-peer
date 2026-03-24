@@ -17,6 +17,7 @@ import (
 
 	"github.com/mrostamii/ai-peer/pkg/apiv1"
 	"github.com/mrostamii/ai-peer/pkg/backend/ollama"
+	"github.com/mrostamii/ai-peer/pkg/x402spike"
 )
 
 const InferenceProtocolID = protocol.ID("/ai-peer/v0.1/inference/1.0.0")
@@ -78,6 +79,22 @@ func (r *Runtime) registerInferenceHandler(backend inferenceBackend) {
 		} else {
 			paymentSession = sess
 		}
+		if paymentSession != nil && paymentSession.PendingResult != nil {
+			success = true
+			tokensUsed = paymentSession.PendingResult.TokensUsed
+			resp := &apiv1.InferenceResponse{
+				RequestId:  req.GetRequestId(),
+				Content:    paymentSession.PendingResult.Content,
+				TokensUsed: paymentSession.PendingResult.TokensUsed,
+				LatencyMs:  paymentSession.PendingResult.LatencyMs,
+				Ok:         true,
+			}
+			if err := json.NewEncoder(s).Encode(resp); err != nil {
+				log.Printf("inference stream encode warning: %v", err)
+			}
+			r.deletePendingInferenceResult(paymentSession.PaymentKey)
+			return
+		}
 		started := time.Now()
 		resp, err := inferWithBackend(context.Background(), backend, &req)
 		if err != nil {
@@ -93,9 +110,40 @@ func (r *Runtime) registerInferenceHandler(backend inferenceBackend) {
 		// Unary backend responses do not expose TTFT, so use total duration as a proxy.
 		r.recordInferenceSample(total, total, resp.GetTokensUsed())
 		tokensUsed = resp.GetTokensUsed()
+		resp.LatencyMs = time.Since(started).Milliseconds()
+		if paymentSession != nil {
+			actualDue := r.computeActualDueAtomic(paymentSession, tokensUsed)
+			outstanding := paymentSession.PriorDebtAtomic + actualDue - paymentSession.PrepaidAtomic
+			if outstanding > 0 {
+				r.setPaymentDebt(paymentSession.Payer, outstanding)
+				r.setPendingInferenceResult(paymentSession.PaymentKey, pendingInferenceResult{
+					Content:    resp.GetContent(),
+					TokensUsed: tokensUsed,
+					LatencyMs:  resp.GetLatencyMs(),
+				})
+				finalReq := paymentSession.Requirement
+				finalReq.Amount = strconv.FormatInt(outstanding, 10)
+				pr := x402spike.PaymentRequired{
+					X402Version: 2,
+					Error:       "final payment required for exact settlement",
+					Resource: x402spike.ResourceInfo{
+						URL:         paymentSession.ResourceURL,
+						Description: "final settlement for completed inference",
+						MimeType:    "application/json",
+					},
+					Accepts: []x402spike.PaymentRequirements{finalReq},
+				}
+				failure = "payment required"
+				_ = json.NewEncoder(s).Encode(&apiv1.InferenceResponse{
+					RequestId:    req.GetRequestId(),
+					Ok:           false,
+					ErrorMessage: encodePaymentRequiredEnvelope("final payment required", pr, x402spike.SettlementResponse{}),
+				})
+				return
+			}
+		}
 		r.reconcileActualUsage(paymentSession, tokensUsed)
 		success = true
-		resp.LatencyMs = time.Since(started).Milliseconds()
 		if err := json.NewEncoder(s).Encode(resp); err != nil {
 			log.Printf("inference stream encode warning: %v", err)
 		}
@@ -224,6 +272,9 @@ func (r *Runtime) registerInferenceStreamHandler(backend streamInferenceBackend)
 				Ok:         true,
 			}); err != nil {
 				failure = "encode response chunk: " + err.Error()
+				if paymentSession != nil {
+					r.markAbortedStreamDebt(paymentSession)
+				}
 				return
 			}
 			if chunk.Done {

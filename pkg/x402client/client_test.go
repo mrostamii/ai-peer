@@ -118,3 +118,66 @@ func TestDoWithPaymentPassesThroughNon402(t *testing.T) {
 		t.Fatalf("callCount=%d want 1", callCount)
 	}
 }
+
+func TestDoWithPaymentHandlesMultiple402Rounds(t *testing.T) {
+	t.Parallel()
+	var callCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount <= 2 {
+			pr := x402spike.PaymentRequired{
+				X402Version: 2,
+				Error:       "PAYMENT-SIGNATURE header is required",
+				Resource: x402spike.ResourceInfo{
+					URL:         "http://" + r.Host + r.URL.Path,
+					Description: "paid endpoint",
+					MimeType:    "application/json",
+				},
+				Accepts: []x402spike.PaymentRequirements{
+					{
+						Scheme:            "exact",
+						Network:           "eip155:84532",
+						Amount:            "10000",
+						Asset:             "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+						PayTo:             "0x209693Bc6afc0C5328bA36FaF03C514EF312287C",
+						MaxTimeoutSeconds: 60,
+						Extra: map[string]any{
+							"name":    "USDC",
+							"version": "2",
+						},
+					},
+				},
+			}
+			if callCount == 2 {
+				pr.Accepts[0].Amount = "15000"
+			}
+			header, _ := x402spike.EncodeBase64JSON(pr)
+			w.Header().Set("PAYMENT-REQUIRED", header)
+			w.WriteHeader(http.StatusPaymentRequired)
+			_ = json.NewEncoder(w).Encode(pr)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	client := &Client{
+		HTTPClient:  srv.Client(),
+		PrivateKey:  "0x4f3edf983ac636a65a842ce7c78d9aa706d3b113bce036f4d4dfb6f9e9f5d1d7",
+		NowProvider: time.Now,
+	}
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/chat/completions", strings.NewReader(`{"model":"qwen2.5:3b"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.DoWithPayment(req)
+	if err != nil {
+		t.Fatalf("DoWithPayment returned error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d want 200", resp.StatusCode)
+	}
+	if callCount != 3 {
+		t.Fatalf("callCount=%d want 3", callCount)
+	}
+}

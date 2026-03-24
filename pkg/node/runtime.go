@@ -37,6 +37,8 @@ type Runtime struct {
 	inferencePaywall   *x402InferencePaywallConfig
 	paymentDebtMu      sync.Mutex
 	paymentDebtByPayer map[string]int64
+	pendingPayMu       sync.Mutex
+	pendingPayByKey    map[string]pendingInferenceResult
 
 	inflightInference atomic.Int64
 	statsMu           sync.RWMutex
@@ -116,6 +118,7 @@ func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 		reconnect:          useCustomBootstraps,
 		startedAt:          time.Now(),
 		paymentDebtByPayer: make(map[string]int64),
+		pendingPayByKey:    make(map[string]pendingInferenceResult),
 	}
 	return r, nil
 }
