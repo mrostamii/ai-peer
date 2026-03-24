@@ -206,3 +206,30 @@ models:
 		t.Fatalf("backend.base_url=%q want http://127.0.0.1:11434", cfg.Backend.BaseURL)
 	}
 }
+
+func TestLoadAllowsEmptyAdvertisedModels(t *testing.T) {
+	t.Parallel()
+	d := t.TempDir()
+	p := filepath.Join(d, "gateway-only.yaml")
+	err := os.WriteFile(p, []byte(`node:
+  name: "gw-only"
+listen:
+  tcp_port: 4001
+  quic_port: 4001
+network:
+  bootstrap_peers: []
+models:
+  advertised: []
+`), 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(cfg.Models.Advertised) != 0 {
+		t.Fatalf("advertised model count=%d want 0", len(cfg.Models.Advertised))
+	}
+}

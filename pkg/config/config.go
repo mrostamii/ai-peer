@@ -180,9 +180,6 @@ func (c *Config) Validate() error {
 	if _, err := url.ParseRequestURI(c.Backend.BaseURL); err != nil {
 		return fmt.Errorf("backend.base_url is invalid: %w", err)
 	}
-	if len(c.Models.Advertised) == 0 {
-		return fmt.Errorf("models.advertised must contain at least one model")
-	}
 	if c.Heartbeat.IntervalSec <= 0 {
 		return fmt.Errorf("heartbeat.interval_sec must be > 0")
 	}
