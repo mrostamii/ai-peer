@@ -7,6 +7,8 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	libp2p "github.com/libp2p/go-libp2p"
@@ -15,8 +17,8 @@ import (
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
-	noise "github.com/libp2p/go-libp2p/p2p/security/noise"
 	ping "github.com/libp2p/go-libp2p/p2p/protocol/ping"
+	noise "github.com/libp2p/go-libp2p/p2p/security/noise"
 	ma "github.com/multiformats/go-multiaddr"
 
 	"github.com/mrostamii/ai-peer/pkg/backend/ollama"
@@ -26,12 +28,26 @@ import (
 const bootstrapReconnectEvery = 30 * time.Second
 
 type Runtime struct {
-	host       host.Host
-	dht        *dht.IpfsDHT
-	bootstraps []peer.AddrInfo
-	reconnect  bool
-	startedAt  time.Time
-	metricsSrv *http.Server
+	host               host.Host
+	dht                *dht.IpfsDHT
+	bootstraps         []peer.AddrInfo
+	reconnect          bool
+	startedAt          time.Time
+	metricsSrv         *http.Server
+	inferencePaywall   *x402InferencePaywallConfig
+	paymentDebtMu      sync.Mutex
+	paymentDebtByPayer map[string]int64
+	pendingPayMu       sync.Mutex
+	pendingPayByKey    map[string]pendingInferenceResult
+
+	inflightInference atomic.Int64
+	statsMu           sync.RWMutex
+	latencyEMAms      float64
+	hasLatencySample  bool
+	ttftEMAms         float64
+	hasTTFTSample     bool
+	decodeTPSEMA      float64
+	hasDecodeSample   bool
 }
 
 func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
@@ -96,11 +112,13 @@ func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 	}
 
 	r := &Runtime{
-		host:       h,
-		dht:        kdht,
-		bootstraps: bootstraps,
-		reconnect:  useCustomBootstraps,
-		startedAt:  time.Now(),
+		host:               h,
+		dht:                kdht,
+		bootstraps:         bootstraps,
+		reconnect:          useCustomBootstraps,
+		startedAt:          time.Now(),
+		paymentDebtByPayer: make(map[string]int64),
+		pendingPayByKey:    make(map[string]pendingInferenceResult),
 	}
 	return r, nil
 }
@@ -110,6 +128,7 @@ func Start(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
+	r.inferencePaywall = buildInferencePaywallConfig(cfg)
 	r.logDialAddrs()
 
 	if r.reconnect {
@@ -127,7 +146,12 @@ func Start(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 		r.metricsSrv = metricsSrv
 	}
 	hw := DetectHardware()
-	go r.advertiseCapabilitiesLoop(ctx, cfg.Models.Advertised, hw, "0")
+	pricePer1K := "0"
+	if cfg.Node.X402.Enabled && cfg.Node.X402.PricePer1KAtomic > 0 {
+		pricePer1K = fmt.Sprintf("%d", cfg.Node.X402.PricePer1KAtomic)
+	}
+	modelPricing := buildAdvertisedModelPricing(cfg)
+	go r.advertiseCapabilitiesLoop(ctx, cfg.Models.Advertised, hw, pricePer1K)
 	r.registerInferenceHandler(ollama.New(cfg.Backend.BaseURL))
 	r.registerInferenceStreamHandler(ollama.New(cfg.Backend.BaseURL))
 	ps, err := pubsub.NewGossipSub(ctx, r.host)
@@ -140,7 +164,7 @@ func Start(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 		log.Printf("health heartbeat disabled: join topic %q failed: %v", HealthTopicID, err)
 		return r, nil
 	}
-	go r.healthHeartbeatLoop(ctx, time.Duration(cfg.Heartbeat.IntervalSec)*time.Second, &gossipsubPublisher{topic: healthTopic}, cfg.Models.Advertised)
+	go r.healthHeartbeatLoop(ctx, time.Duration(cfg.Heartbeat.IntervalSec)*time.Second, &gossipsubPublisher{topic: healthTopic}, cfg.Models.Advertised, modelPricing)
 	return r, nil
 }
 

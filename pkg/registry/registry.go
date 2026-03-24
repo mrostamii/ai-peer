@@ -27,24 +27,37 @@ type Registry struct {
 
 // NodeRecord is a snapshot-friendly view of one peer.
 type NodeRecord struct {
-	NodeID          string    `json:"node_id"`
-	Models          []string  `json:"models"`
-	HardwareSummary string    `json:"hardware_summary,omitempty"`
-	LocationHint    string    `json:"location_hint,omitempty"`
-	PricingHint     string    `json:"pricing_hint,omitempty"`
-	LastSeen        time.Time `json:"last_seen"`
-	UptimeSec       int64     `json:"uptime_sec"`
-	Load            float64   `json:"load"`
-	LatencyMs       int64     `json:"latency_ms"`
+	NodeID          string                      `json:"node_id"`
+	Models          []string                    `json:"models"`
+	ModelPricing    map[string]ModelPricingHint `json:"model_pricing,omitempty"`
+	HardwareSummary string                      `json:"hardware_summary,omitempty"`
+	LocationHint    string                      `json:"location_hint,omitempty"`
+	PricingHint     string                      `json:"pricing_hint,omitempty"`
+	LastSeen        time.Time                   `json:"last_seen"`
+	UptimeSec       int64                       `json:"uptime_sec"`
+	Load            float64                     `json:"load"`
+	LatencyMs       int64                       `json:"latency_ms"`
+	TTFTMs          int64                       `json:"ttft_ms"`
+	DecodeTPS       float64                     `json:"decode_tps"`
 }
 
 type healthJSON struct {
-	NodeID      string   `json:"node_id"`
-	UptimeSec   int64    `json:"uptime_sec"`
-	Load        float64  `json:"load"`
-	LatencyMs   int64    `json:"latency_ms"`
-	TimestampMs int64    `json:"timestamp_ms"`
-	Models      []string `json:"models,omitempty"`
+	NodeID       string                      `json:"node_id"`
+	UptimeSec    int64                       `json:"uptime_sec"`
+	Load         float64                     `json:"load"`
+	LatencyMs    int64                       `json:"latency_ms"`
+	TTFTMs       int64                       `json:"ttft_ms"`
+	DecodeTPS    float64                     `json:"decode_tps"`
+	TimestampMs  int64                       `json:"timestamp_ms"`
+	Models       []string                    `json:"models,omitempty"`
+	ModelPricing map[string]ModelPricingHint `json:"model_pricing,omitempty"`
+}
+
+type ModelPricingHint struct {
+	PricePer1KAtomic    int64 `json:"price_per_1k_atomic,omitempty"`
+	MinAmountAtomic     int64 `json:"min_amount_atomic,omitempty"`
+	MaxAmountAtomic     int64 `json:"max_amount_atomic,omitempty"`
+	DefaultOutputTokens int64 `json:"default_output_tokens,omitempty"`
 }
 
 // Option configures Registry construction.
@@ -138,9 +151,14 @@ func (r *Registry) ApplyHealthJSON(payload []byte) error {
 	rec.UptimeSec = hj.UptimeSec
 	rec.Load = hj.Load
 	rec.LatencyMs = hj.LatencyMs
+	rec.TTFTMs = hj.TTFTMs
+	rec.DecodeTPS = hj.DecodeTPS
 	if len(hj.Models) > 0 {
 		rec.Models = append([]string(nil), hj.Models...)
 		sort.Strings(rec.Models)
+	}
+	if len(hj.ModelPricing) > 0 {
+		rec.ModelPricing = cloneModelPricing(hj.ModelPricing)
 	}
 	return nil
 }
@@ -232,5 +250,17 @@ func (r *Registry) Len() int {
 func cloneRecord(rec *NodeRecord) *NodeRecord {
 	cp := *rec
 	cp.Models = append([]string(nil), rec.Models...)
+	cp.ModelPricing = cloneModelPricing(rec.ModelPricing)
 	return &cp
+}
+
+func cloneModelPricing(in map[string]ModelPricingHint) map[string]ModelPricingHint {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]ModelPricingHint, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }

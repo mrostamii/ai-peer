@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -15,17 +16,20 @@ import (
 
 	"github.com/mrostamii/ai-peer/pkg/apiv1"
 	"github.com/mrostamii/ai-peer/pkg/registry"
+	"github.com/mrostamii/ai-peer/pkg/x402spike"
 )
 
 type OpenAIProxy struct {
-	listenAddr string
-	ollamaBase string
-	reg        *registry.Registry
-	remoteChat RemoteChatFunc
-	remoteStreamChat RemoteStreamChatFunc
-	peerLatency PeerLatencyFunc
-	firstTokenTimeout time.Duration
+	listenAddr          string
+	ollamaBase          string
+	localBackendEnabled bool
+	reg                 *registry.Registry
+	remoteChat          RemoteChatFunc
+	remoteStreamChat    RemoteStreamChatFunc
+	peerLatency         PeerLatencyFunc
+	firstTokenTimeout   time.Duration
 	totalRequestTimeout time.Duration
+	chatPaywall         *X402PaywallConfig
 }
 
 const maxRemoteRetries = 2
@@ -36,9 +40,13 @@ type RemoteChatMessage struct {
 }
 
 type RemoteChatRequest struct {
-	Model       string
-	Messages    []RemoteChatMessage
-	Temperature *float64
+	RequestID        string
+	Model            string
+	Messages         []RemoteChatMessage
+	MaxTokens        *int
+	Temperature      *float64
+	PaymentSignature string
+	ResourceURL      string
 }
 
 type RemoteChatResponse struct {
@@ -51,16 +59,37 @@ type RemoteChatFunc func(context.Context, string, *RemoteChatRequest) (*RemoteCh
 type RemoteStreamChatFunc func(context.Context, string, *RemoteChatRequest) (io.ReadCloser, error)
 type PeerLatencyFunc func(context.Context, string) (time.Duration, error)
 
+type RemotePaymentRequiredError struct {
+	Message               string
+	PaymentRequiredHeader string
+	PaymentResponseHeader string
+}
+
+func (e *RemotePaymentRequiredError) Error() string {
+	if e == nil {
+		return "remote payment required"
+	}
+	if strings.TrimSpace(e.Message) == "" {
+		return "remote payment required"
+	}
+	return e.Message
+}
+
 // NewOpenAIProxy serves OpenAI-shaped HTTP. If reg is non-nil, GET /v1/network/nodes
 // returns peers learned from gossip health messages.
 func NewOpenAIProxy(listenAddr, ollamaBase string, reg *registry.Registry) *OpenAIProxy {
 	return &OpenAIProxy{
-		listenAddr: listenAddr,
-		ollamaBase: strings.TrimRight(ollamaBase, "/"),
-		reg:        reg,
-		firstTokenTimeout: 30 * time.Second,
+		listenAddr:          listenAddr,
+		ollamaBase:          strings.TrimRight(ollamaBase, "/"),
+		localBackendEnabled: true,
+		reg:                 reg,
+		firstTokenTimeout:   30 * time.Second,
 		totalRequestTimeout: 120 * time.Second,
 	}
+}
+
+func (p *OpenAIProxy) SetLocalBackendEnabled(enabled bool) {
+	p.localBackendEnabled = enabled
 }
 
 func (p *OpenAIProxy) SetRemoteChatFunc(fn RemoteChatFunc) {
@@ -132,50 +161,51 @@ func (p *OpenAIProxy) handleNetworkNodes(w http.ResponseWriter, _ *http.Request)
 }
 
 func (p *OpenAIProxy) handleModels(w http.ResponseWriter, r *http.Request) {
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, p.ollamaBase+"/api/tags", nil)
-	if err != nil {
-		_ = writeJSON(w, http.StatusInternalServerError, openAIError(http.StatusInternalServerError, err.Error()))
-		return
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		_ = writeJSON(w, http.StatusBadGateway, openAIError(http.StatusBadGateway, err.Error()))
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		_ = writeJSON(w, http.StatusBadGateway, openAIError(http.StatusBadGateway, err.Error()))
-		return
-	}
-	if resp.StatusCode != http.StatusOK {
-		_ = writeJSON(w, http.StatusBadGateway, openAIError(http.StatusBadGateway, string(body)))
-		return
-	}
-
-	var tags struct {
-		Models []struct {
-			Name  string `json:"name"`
-			Model string `json:"model"`
-		} `json:"models"`
-	}
-	if err := json.Unmarshal(body, &tags); err != nil {
-		_ = writeJSON(w, http.StatusBadGateway, openAIError(http.StatusBadGateway, "ollama tags decode: "+err.Error()))
-		return
-	}
-
 	seen := map[string]struct{}{}
-	for _, m := range tags.Models {
-		id := m.Name
-		if id == "" {
-			id = m.Model
+	if p.localBackendEnabled {
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, p.ollamaBase+"/api/tags", nil)
+		if err != nil {
+			_ = writeJSON(w, http.StatusInternalServerError, openAIError(http.StatusInternalServerError, err.Error()))
+			return
 		}
-		id = strings.TrimSpace(id)
-		if id == "" {
-			continue
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			_ = writeJSON(w, http.StatusBadGateway, openAIError(http.StatusBadGateway, err.Error()))
+			return
 		}
-		seen[id] = struct{}{}
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			_ = writeJSON(w, http.StatusBadGateway, openAIError(http.StatusBadGateway, err.Error()))
+			return
+		}
+		if resp.StatusCode != http.StatusOK {
+			_ = writeJSON(w, http.StatusBadGateway, openAIError(http.StatusBadGateway, string(body)))
+			return
+		}
+
+		var tags struct {
+			Models []struct {
+				Name  string `json:"name"`
+				Model string `json:"model"`
+			} `json:"models"`
+		}
+		if err := json.Unmarshal(body, &tags); err != nil {
+			_ = writeJSON(w, http.StatusBadGateway, openAIError(http.StatusBadGateway, "ollama tags decode: "+err.Error()))
+			return
+		}
+		for _, m := range tags.Models {
+			id := m.Name
+			if id == "" {
+				id = m.Model
+			}
+			id = strings.TrimSpace(id)
+			if id == "" {
+				continue
+			}
+			seen[id] = struct{}{}
+		}
 	}
 	if p.reg != nil {
 		for _, rec := range p.reg.List() {
@@ -207,6 +237,9 @@ func (p *OpenAIProxy) handleModels(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+	requestID := fmt.Sprintf("gw-%d", time.Now().UnixNano())
+	w.Header().Set("X-AI-Peer-Request-ID", requestID)
+	r.Header.Set("X-AI-Peer-Request-ID", requestID)
 	if ct := r.Header.Get("Content-Type"); !strings.Contains(strings.ToLower(ct), "application/json") {
 		_ = writeJSON(w, http.StatusUnsupportedMediaType, openAIError(http.StatusUnsupportedMediaType, "expected application/json body"))
 		return
@@ -225,8 +258,11 @@ func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 		_ = writeJSON(w, http.StatusBadRequest, openAIError(http.StatusBadRequest, "missing messages"))
 		return
 	}
+	if !p.enforceChatPayment(w, r, &oreq) {
+		return
+	}
 	if oreq.Stream {
-		p.handleChatCompletionsStream(w, r, &oreq)
+		p.handleChatCompletionsStream(w, r, &oreq, requestID)
 		return
 	}
 	started := time.Now()
@@ -237,6 +273,7 @@ func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 	defer func() {
 		p.logRequest(map[string]any{
 			"event":       "inference_request",
+			"request_id":  requestID,
 			"stream":      false,
 			"model":       oreq.Model,
 			"node_id":     selectedNode,
@@ -254,9 +291,13 @@ func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 		nodes = p.reorderNodesByPing(r.Context(), nodes)
 		if len(nodes) > 0 {
 			remoteReq := &RemoteChatRequest{
-				Model:       oreq.Model,
-				Messages:    make([]RemoteChatMessage, 0, len(oreq.Messages)),
-				Temperature: oreq.Temperature,
+				RequestID:        requestID,
+				Model:            oreq.Model,
+				MaxTokens:        oreq.MaxTokens,
+				Messages:         make([]RemoteChatMessage, 0, len(oreq.Messages)),
+				Temperature:      oreq.Temperature,
+				PaymentSignature: strings.TrimSpace(r.Header.Get("PAYMENT-SIGNATURE")),
+				ResourceURL:      requestURL(r),
 			}
 			for _, msg := range oreq.Messages {
 				remoteReq.Messages = append(remoteReq.Messages, RemoteChatMessage{
@@ -271,17 +312,29 @@ func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 				selectedNode = node.NodeID
 				resp, err := p.remoteChat(reqCtx, node.NodeID, remoteReq)
 				if err != nil {
+					var payErr *RemotePaymentRequiredError
+					if errors.As(err, &payErr) {
+						failure = payErr.Error()
+						if p.writeRemotePaymentRequired(w, payErr) {
+							return
+						}
+					}
 					failure = err.Error()
 					continue
 				}
 				tokensUsed = resp.CompletionTokens
 				success = true
-				_ = writeJSON(w, http.StatusOK, openAIChatCompletionFromRemote(resp, oreq.Model))
+				_ = writeJSON(w, http.StatusOK, openAIChatCompletionFromRemote(resp, oreq.Model, requestID))
 				return
 			}
 		}
 	}
 	selectedNode = "local"
+	if !p.localBackendEnabled {
+		failure = "no remote provider available for model"
+		_ = writeJSON(w, http.StatusServiceUnavailable, openAIError(http.StatusServiceUnavailable, failure))
+		return
+	}
 
 	body := toOllamaChatBody(&oreq)
 	raw, err := json.Marshal(body)
@@ -327,23 +380,26 @@ func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 
 	tokensUsed = int64(ochat.PromptEvalCount + ochat.EvalCount)
 	success = true
-	_ = writeJSON(w, http.StatusOK, openAIChatCompletionFromOllama(&ochat, oreq.Model))
+	_ = writeJSON(w, http.StatusOK, openAIChatCompletionFromOllama(&ochat, oreq.Model, requestID))
 }
 
-func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http.Request, oreq *openAIChatRequest) {
+func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http.Request, oreq *openAIChatRequest, requestID string) {
 	started := time.Now()
 	selectedNode := ""
+	tokensUsed := int64(0)
 	success := false
 	failure := ""
 	defer func() {
 		p.logRequest(map[string]any{
-			"event":      "inference_request",
-			"stream":     true,
-			"model":      oreq.Model,
-			"node_id":    selectedNode,
-			"latency_ms": time.Since(started).Milliseconds(),
-			"ok":         success,
-			"error":      failure,
+			"event":       "inference_request",
+			"request_id":  requestID,
+			"stream":      true,
+			"model":       oreq.Model,
+			"node_id":     selectedNode,
+			"latency_ms":  time.Since(started).Milliseconds(),
+			"tokens_used": tokensUsed,
+			"ok":          success,
+			"error":       failure,
 		})
 	}()
 	reqCtx, cancel := context.WithTimeout(r.Context(), p.totalRequestTimeout)
@@ -358,8 +414,12 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 			selectedNode = node.NodeID
 			attemptStarted := time.Now()
 			rc, err := p.remoteStreamChat(reqCtx, node.NodeID, &RemoteChatRequest{
-				Model:       oreq.Model,
-				Temperature: oreq.Temperature,
+				RequestID:        requestID,
+				Model:            oreq.Model,
+				MaxTokens:        oreq.MaxTokens,
+				Temperature:      oreq.Temperature,
+				PaymentSignature: strings.TrimSpace(r.Header.Get("PAYMENT-SIGNATURE")),
+				ResourceURL:      requestURL(r),
 				Messages: func() []RemoteChatMessage {
 					out := make([]RemoteChatMessage, 0, len(oreq.Messages))
 					for _, m := range oreq.Messages {
@@ -369,6 +429,13 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 				}(),
 			})
 			if err != nil {
+				var payErr *RemotePaymentRequiredError
+				if errors.As(err, &payErr) {
+					failure = payErr.Error()
+					if p.writeRemotePaymentRequired(w, payErr) {
+						return
+					}
+				}
 				failure = err.Error()
 				continue
 			}
@@ -385,6 +452,16 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 				failure = err.Error()
 				continue
 			}
+			if !first.GetOk() {
+				if payErr, ok := decodeRemotePaymentRequiredError(first.GetErrorMessage()); ok {
+					failure = payErr.Error()
+					if p.writeRemotePaymentRequired(w, payErr) {
+						return
+					}
+				}
+				failure = first.GetErrorMessage()
+				continue
+			}
 
 			flusher, ok := w.(http.Flusher)
 			if !ok {
@@ -396,12 +473,6 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 			w.Header().Set("Cache-Control", "no-cache")
 			w.Header().Set("Connection", "keep-alive")
 			w.WriteHeader(http.StatusOK)
-			if !first.GetOk() {
-				failure = first.GetErrorMessage()
-				_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
-				flusher.Flush()
-				return
-			}
 			if model == "" && first.GetModel() != "" {
 				model = first.GetModel()
 			}
@@ -414,11 +485,12 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 				finishReason = "stop"
 			}
 			firstChunk = false
-			if err := p.writeSSEChunk(w, flusher, chatID, created, model, delta, finishReason); err != nil {
+			if err := p.writeSSEChunk(w, flusher, chatID, created, model, requestID, delta, finishReason); err != nil {
 				failure = err.Error()
 				return
 			}
 			if first.GetDone() {
+				tokensUsed = first.GetTokensUsed()
 				success = true
 				_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 				flusher.Flush()
@@ -449,10 +521,11 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 				}
 				finishReason := any(nil)
 				if chunk.GetDone() {
+					tokensUsed = chunk.GetTokensUsed()
 					finishReason = "stop"
 				}
 				firstChunk = false
-				if err := p.writeSSEChunk(w, flusher, chatID, created, model, delta, finishReason); err != nil {
+				if err := p.writeSSEChunk(w, flusher, chatID, created, model, requestID, delta, finishReason); err != nil {
 					failure = err.Error()
 					return
 				}
@@ -467,6 +540,11 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 		}
 	}
 	selectedNode = "local"
+	if !p.localBackendEnabled {
+		failure = "no remote provider available for model"
+		_ = writeJSON(w, http.StatusServiceUnavailable, openAIError(http.StatusServiceUnavailable, failure))
+		return
+	}
 
 	body := toOllamaChatBody(oreq)
 	raw, err := json.Marshal(body)
@@ -531,10 +609,11 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 	}
 	firstFinish := any(nil)
 	if first.Done {
+		tokensUsed = int64(first.PromptEvalCount + first.EvalCount)
 		firstFinish = "stop"
 	}
 	firstChunk = false
-	if err := p.writeSSEChunk(w, flusher, chatID, created, model, firstDelta, firstFinish); err != nil {
+	if err := p.writeSSEChunk(w, flusher, chatID, created, model, requestID, firstDelta, firstFinish); err != nil {
 		failure = err.Error()
 		return
 	}
@@ -565,10 +644,11 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 		}
 		finishReason := any(nil)
 		if chunk.Done {
+			tokensUsed = int64(chunk.PromptEvalCount + chunk.EvalCount)
 			finishReason = "stop"
 		}
 		firstChunk = false
-		if err := p.writeSSEChunk(w, flusher, chatID, created, model, delta, finishReason); err != nil {
+		if err := p.writeSSEChunk(w, flusher, chatID, created, model, requestID, delta, finishReason); err != nil {
 			failure = err.Error()
 			return
 		}
@@ -576,6 +656,48 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 	success = true
 	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 	flusher.Flush()
+}
+
+func decodeRemotePaymentRequiredError(msg string) (*RemotePaymentRequiredError, bool) {
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return nil, false
+	}
+	var env struct {
+		Code            string `json:"code"`
+		Message         string `json:"message"`
+		PaymentRequired string `json:"payment_required"`
+		PaymentResponse string `json:"payment_response"`
+	}
+	if err := json.Unmarshal([]byte(msg), &env); err != nil {
+		return nil, false
+	}
+	if env.Code != "payment_required" || strings.TrimSpace(env.PaymentRequired) == "" {
+		return nil, false
+	}
+	return &RemotePaymentRequiredError{
+		Message:               env.Message,
+		PaymentRequiredHeader: env.PaymentRequired,
+		PaymentResponseHeader: env.PaymentResponse,
+	}, true
+}
+
+func (p *OpenAIProxy) writeRemotePaymentRequired(w http.ResponseWriter, payErr *RemotePaymentRequiredError) bool {
+	if payErr == nil || strings.TrimSpace(payErr.PaymentRequiredHeader) == "" {
+		return false
+	}
+	var pr x402spike.PaymentRequired
+	if err := x402spike.DecodeBase64JSON(payErr.PaymentRequiredHeader, &pr); err != nil {
+		return false
+	}
+	var settle x402spike.SettlementResponse
+	if strings.TrimSpace(payErr.PaymentResponseHeader) != "" {
+		if err := x402spike.DecodeBase64JSON(payErr.PaymentResponseHeader, &settle); err != nil {
+			settle = x402spike.SettlementResponse{}
+		}
+	}
+	writePaymentRequired(w, pr, settle)
+	return true
 }
 
 func (p *OpenAIProxy) reorderNodesByPing(ctx context.Context, nodes []registry.NodeRecord) []registry.NodeRecord {
@@ -635,6 +757,22 @@ func rankedNodesForModel(reg *registry.Registry, model string) []registry.NodeRe
 		if a.Load != b.Load {
 			return a.Load < b.Load
 		}
+		aHasTTFT := a.TTFTMs > 0
+		bHasTTFT := b.TTFTMs > 0
+		if aHasTTFT != bHasTTFT {
+			return aHasTTFT
+		}
+		if aHasTTFT && a.TTFTMs != b.TTFTMs {
+			return a.TTFTMs < b.TTFTMs
+		}
+		aHasDecode := a.DecodeTPS > 0
+		bHasDecode := b.DecodeTPS > 0
+		if aHasDecode != bHasDecode {
+			return aHasDecode
+		}
+		if aHasDecode && a.DecodeTPS != b.DecodeTPS {
+			return a.DecodeTPS > b.DecodeTPS
+		}
 		if a.LatencyMs != b.LatencyMs {
 			return a.LatencyMs < b.LatencyMs
 		}
@@ -653,6 +791,7 @@ type openAIChatRequest struct {
 	Model       string              `json:"model"`
 	Messages    []openAIChatMessage `json:"messages"`
 	Stream      bool                `json:"stream"`
+	MaxTokens   *int                `json:"max_tokens,omitempty"`
 	Temperature *float64            `json:"temperature,omitempty"`
 }
 
@@ -677,7 +816,9 @@ type ollamaStreamResponse struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
 	} `json:"message"`
-	Done bool `json:"done"`
+	PromptEvalCount int  `json:"prompt_eval_count"`
+	EvalCount       int  `json:"eval_count"`
+	Done            bool `json:"done"`
 }
 
 func toOllamaChatBody(req *openAIChatRequest) map[string]any {
@@ -696,16 +837,17 @@ func toOllamaChatBody(req *openAIChatRequest) map[string]any {
 	return body
 }
 
-func openAIChatCompletionFromOllama(ollama *ollamaChatResponse, requestedModel string) map[string]any {
+func openAIChatCompletionFromOllama(ollama *ollamaChatResponse, requestedModel, requestID string) map[string]any {
 	model := requestedModel
 	if model == "" {
 		model = ollama.Model
 	}
 	return map[string]any{
-		"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
-		"object":  "chat.completion",
-		"created": time.Now().Unix(),
-		"model":   model,
+		"id":           fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+		"object":       "chat.completion",
+		"created":      time.Now().Unix(),
+		"model":        model,
+		"x_request_id": requestID,
 		"choices": []map[string]any{
 			{
 				"index":         0,
@@ -721,7 +863,7 @@ func openAIChatCompletionFromOllama(ollama *ollamaChatResponse, requestedModel s
 	}
 }
 
-func openAIChatCompletionFromRemote(remote *RemoteChatResponse, requestedModel string) map[string]any {
+func openAIChatCompletionFromRemote(remote *RemoteChatResponse, requestedModel, requestID string) map[string]any {
 	model := requestedModel
 	if model == "" && remote != nil {
 		model = remote.Model
@@ -733,10 +875,11 @@ func openAIChatCompletionFromRemote(remote *RemoteChatResponse, requestedModel s
 		tokens = remote.CompletionTokens
 	}
 	return map[string]any{
-		"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
-		"object":  "chat.completion",
-		"created": time.Now().Unix(),
-		"model":   model,
+		"id":           fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+		"object":       "chat.completion",
+		"created":      time.Now().Unix(),
+		"model":        model,
+		"x_request_id": requestID,
 		"choices": []map[string]any{
 			{
 				"index":         0,
@@ -781,12 +924,13 @@ func (p *OpenAIProxy) decodeWithTimeout(timeout time.Duration, decodeFn func() e
 	}
 }
 
-func (p *OpenAIProxy) writeSSEChunk(w io.Writer, flusher http.Flusher, id string, created int64, model string, delta map[string]any, finishReason any) error {
+func (p *OpenAIProxy) writeSSEChunk(w io.Writer, flusher http.Flusher, id string, created int64, model string, requestID string, delta map[string]any, finishReason any) error {
 	event := map[string]any{
-		"id":      id,
-		"object":  "chat.completion.chunk",
-		"created": created,
-		"model":   model,
+		"id":           id,
+		"object":       "chat.completion.chunk",
+		"created":      created,
+		"model":        model,
+		"x_request_id": requestID,
 		"choices": []map[string]any{
 			{
 				"index":         0,
@@ -807,12 +951,72 @@ func (p *OpenAIProxy) writeSSEChunk(w io.Writer, flusher http.Flusher, id string
 }
 
 func (p *OpenAIProxy) logRequest(fields map[string]any) {
-	raw, err := json.Marshal(fields)
+	raw, err := json.Marshal(sanitizeLogFields(fields))
 	if err != nil {
 		log.Printf("gateway log marshal error: %v", err)
 		return
 	}
 	log.Print(string(raw))
+}
+
+func sanitizeLogFields(fields map[string]any) map[string]any {
+	if fields == nil {
+		return nil
+	}
+	out := make(map[string]any, len(fields))
+	for k, v := range fields {
+		lk := strings.ToLower(strings.TrimSpace(k))
+		switch lk {
+		case "content", "message", "messages", "prompt", "prompt_text", "input":
+			out[k] = "[redacted]"
+			continue
+		case "error":
+			if s, ok := v.(string); ok {
+				out[k] = sanitizeLogError(s)
+				continue
+			}
+		}
+		out[k] = sanitizeLogValue(v)
+	}
+	return out
+}
+
+func sanitizeLogValue(v any) any {
+	switch vv := v.(type) {
+	case map[string]any:
+		return sanitizeLogFields(vv)
+	case []any:
+		out := make([]any, 0, len(vv))
+		for _, item := range vv {
+			out = append(out, sanitizeLogValue(item))
+		}
+		return out
+	case []map[string]any:
+		out := make([]any, 0, len(vv))
+		for _, item := range vv {
+			out = append(out, sanitizeLogFields(item))
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+func sanitizeLogError(msg string) string {
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return ""
+	}
+	lower := strings.ToLower(msg)
+	if strings.Contains(lower, `"messages"`) ||
+		strings.Contains(lower, `"content"`) ||
+		strings.Contains(lower, `"prompt"`) {
+		return "redacted_potential_prompt_data"
+	}
+	if len(msg) > 256 {
+		return msg[:256] + "...(truncated)"
+	}
+	return msg
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) error {

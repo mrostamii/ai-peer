@@ -1,6 +1,17 @@
 node:
   name: "ovh-lon-1"
   identity_key_file: "./data/node_identity.key" # persist peer ID across restarts
+  x402:
+    enabled: false
+    facilitator_url: "https://x402.org/facilitator"
+    network: "eip155:84532"
+    asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+    pay_to: "0x209693Bc6afc0C5328bA36FaF03C514EF312287C"
+    token_name: "USDC"
+    token_version: "2"
+    price_per_1k_atomic: 10000
+    min_amount_atomic: 1000
+    default_output_tokens: 256
 
 listen:
   tcp_port: 4001
@@ -16,6 +27,16 @@ backend:
 models:
   advertised:
     - "llama3.2:latest"
+  # Optional per-model pricing overrides for dynamic x402 pricing.
+  # These are used only when -x402-price-per-1k is enabled.
+  model_pricing:
+    "qwen2.5:3b":
+      min_amount_atomic: 500
+      max_amount_atomic: 3000
+    "llama3.1:70b":
+      price_per_1k_atomic: 30000
+      min_amount_atomic: 3000
+      max_amount_atomic: 15000
 
 heartbeat:
   interval_sec: 30

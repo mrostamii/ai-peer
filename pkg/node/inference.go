@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/network"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/mrostamii/ai-peer/pkg/apiv1"
 	"github.com/mrostamii/ai-peer/pkg/backend/ollama"
+	"github.com/mrostamii/ai-peer/pkg/x402spike"
 )
 
 const InferenceProtocolID = protocol.ID("/ai-peer/v0.1/inference/1.0.0")
@@ -32,17 +34,71 @@ type streamInferenceBackend interface {
 func (r *Runtime) registerInferenceHandler(backend inferenceBackend) {
 	r.host.SetStreamHandler(InferenceProtocolID, func(s network.Stream) {
 		defer s.Close()
+		inferStarted := r.markInferenceStarted()
+		defer r.markInferenceFinished()
+		handlerStarted := time.Now()
+		remotePeer := s.Conn().RemotePeer().String()
+		reqID := ""
+		model := ""
+		tokensUsed := int64(0)
+		var paymentSession *inferencePaymentSession
+		success := false
+		failure := ""
+		defer func() {
+			logInferenceEvent(map[string]any{
+				"event":       "inference_server_complete",
+				"stream":      false,
+				"remote_peer": remotePeer,
+				"request_id":  reqID,
+				"model":       model,
+				"tokens_used": tokensUsed,
+				"ok":          success,
+				"error":       failure,
+				"latency_ms":  time.Since(handlerStarted).Milliseconds(),
+			})
+		}()
 		var req apiv1.InferenceRequest
 		if err := json.NewDecoder(io.LimitReader(s, 4<<20)).Decode(&req); err != nil {
+			failure = "decode inference request: " + err.Error()
 			_ = json.NewEncoder(s).Encode(&apiv1.InferenceResponse{
 				Ok:           false,
 				ErrorMessage: "decode inference request: " + err.Error(),
 			})
 			return
 		}
+		reqID = req.GetRequestId()
+		model = req.GetModel()
+		if sess, paymentErr, ok := r.enforceInferencePayment(&req); !ok {
+			failure = "payment required"
+			_ = json.NewEncoder(s).Encode(&apiv1.InferenceResponse{
+				RequestId:    req.GetRequestId(),
+				Ok:           false,
+				ErrorMessage: paymentErr,
+			})
+			return
+		} else {
+			paymentSession = sess
+		}
+		if paymentSession != nil && paymentSession.PendingResult != nil {
+			success = true
+			tokensUsed = paymentSession.PendingResult.TokensUsed
+			resp := &apiv1.InferenceResponse{
+				RequestId:  req.GetRequestId(),
+				Content:    paymentSession.PendingResult.Content,
+				TokensUsed: paymentSession.PendingResult.TokensUsed,
+				LatencyMs:  paymentSession.PendingResult.LatencyMs,
+				Ok:         true,
+			}
+			if err := json.NewEncoder(s).Encode(resp); err != nil {
+				log.Printf("inference stream encode warning: %v", err)
+			}
+			r.deletePendingInferenceResult(paymentSession.PaymentKey)
+			return
+		}
 		started := time.Now()
 		resp, err := inferWithBackend(context.Background(), backend, &req)
 		if err != nil {
+			failure = err.Error()
 			_ = json.NewEncoder(s).Encode(&apiv1.InferenceResponse{
 				RequestId:    req.GetRequestId(),
 				Ok:           false,
@@ -50,7 +106,44 @@ func (r *Runtime) registerInferenceHandler(backend inferenceBackend) {
 			})
 			return
 		}
+		total := time.Since(inferStarted)
+		// Unary backend responses do not expose TTFT, so use total duration as a proxy.
+		r.recordInferenceSample(total, total, resp.GetTokensUsed())
+		tokensUsed = resp.GetTokensUsed()
 		resp.LatencyMs = time.Since(started).Milliseconds()
+		if paymentSession != nil {
+			actualDue := r.computeActualDueAtomic(paymentSession, tokensUsed)
+			outstanding := paymentSession.PriorDebtAtomic + actualDue - paymentSession.PrepaidAtomic
+			if outstanding > 0 {
+				r.setPaymentDebt(paymentSession.Payer, outstanding)
+				r.setPendingInferenceResult(paymentSession.PaymentKey, pendingInferenceResult{
+					Content:    resp.GetContent(),
+					TokensUsed: tokensUsed,
+					LatencyMs:  resp.GetLatencyMs(),
+				})
+				finalReq := paymentSession.Requirement
+				finalReq.Amount = strconv.FormatInt(outstanding, 10)
+				pr := x402spike.PaymentRequired{
+					X402Version: 2,
+					Error:       "final payment required for exact settlement",
+					Resource: x402spike.ResourceInfo{
+						URL:         paymentSession.ResourceURL,
+						Description: "final settlement for completed inference",
+						MimeType:    "application/json",
+					},
+					Accepts: []x402spike.PaymentRequirements{finalReq},
+				}
+				failure = "payment required"
+				_ = json.NewEncoder(s).Encode(&apiv1.InferenceResponse{
+					RequestId:    req.GetRequestId(),
+					Ok:           false,
+					ErrorMessage: encodePaymentRequiredEnvelope("final payment required", pr, x402spike.SettlementResponse{}),
+				})
+				return
+			}
+		}
+		r.reconcileActualUsage(paymentSession, tokensUsed)
+		success = true
 		if err := json.NewEncoder(s).Encode(resp); err != nil {
 			log.Printf("inference stream encode warning: %v", err)
 		}
@@ -60,8 +153,39 @@ func (r *Runtime) registerInferenceHandler(backend inferenceBackend) {
 func (r *Runtime) registerInferenceStreamHandler(backend streamInferenceBackend) {
 	r.host.SetStreamHandler(InferenceStreamProtocolID, func(s network.Stream) {
 		defer s.Close()
+		_ = r.markInferenceStarted()
+		streamStarted := time.Now()
+		remotePeer := s.Conn().RemotePeer().String()
+		reqID := ""
+		model := ""
+		tokensUsed := int64(0)
+		var paymentSession *inferencePaymentSession
+		success := false
+		failure := ""
+		var sampleTotal time.Duration
+		var sampleTTFT time.Duration
+		haveSample := false
+		defer func() {
+			if haveSample {
+				r.recordInferenceSample(sampleTotal, sampleTTFT, 0)
+			}
+			r.markInferenceFinished()
+			logInferenceEvent(map[string]any{
+				"event":       "inference_server_complete",
+				"stream":      true,
+				"remote_peer": remotePeer,
+				"request_id":  reqID,
+				"model":       model,
+				"tokens_used": tokensUsed,
+				"ok":          success,
+				"error":       failure,
+				"latency_ms":  time.Since(streamStarted).Milliseconds(),
+				"ttft_ms":     sampleTTFT.Milliseconds(),
+			})
+		}()
 		var req apiv1.InferenceRequest
 		if err := json.NewDecoder(io.LimitReader(s, 4<<20)).Decode(&req); err != nil {
+			failure = "decode inference request: " + err.Error()
 			_ = json.NewEncoder(s).Encode(&apiv1.InferenceStreamChunk{
 				RequestId:    req.GetRequestId(),
 				Done:         true,
@@ -70,8 +194,23 @@ func (r *Runtime) registerInferenceStreamHandler(backend streamInferenceBackend)
 			})
 			return
 		}
+		reqID = req.GetRequestId()
+		model = req.GetModel()
+		if sess, paymentErr, ok := r.enforceInferencePayment(&req); !ok {
+			failure = "payment required"
+			_ = json.NewEncoder(s).Encode(&apiv1.InferenceStreamChunk{
+				RequestId:    req.GetRequestId(),
+				Done:         true,
+				Ok:           false,
+				ErrorMessage: paymentErr,
+			})
+			return
+		} else {
+			paymentSession = sess
+		}
 		rc, err := inferStreamWithBackend(context.Background(), backend, &req)
 		if err != nil {
+			failure = err.Error()
 			_ = json.NewEncoder(s).Encode(&apiv1.InferenceStreamChunk{
 				RequestId:    req.GetRequestId(),
 				Done:         true,
@@ -83,16 +222,27 @@ func (r *Runtime) registerInferenceStreamHandler(backend streamInferenceBackend)
 		defer rc.Close()
 
 		dec := json.NewDecoder(bufio.NewReader(rc))
+		gotFirst := false
 		for {
 			var chunk struct {
 				Model   string `json:"model"`
 				Message struct {
 					Content string `json:"content"`
 				} `json:"message"`
-				Done bool `json:"done"`
+				PromptEvalCount int  `json:"prompt_eval_count"`
+				EvalCount       int  `json:"eval_count"`
+				Done            bool `json:"done"`
 			}
 			if err := dec.Decode(&chunk); err != nil {
 				if err == io.EOF {
+					if gotFirst {
+						sampleTotal = time.Since(streamStarted)
+						if sampleTTFT <= 0 {
+							sampleTTFT = sampleTotal
+						}
+						haveSample = true
+						success = true
+					}
 					_ = json.NewEncoder(s).Encode(&apiv1.InferenceStreamChunk{
 						RequestId: req.GetRequestId(),
 						Done:      true,
@@ -100,6 +250,7 @@ func (r *Runtime) registerInferenceStreamHandler(backend streamInferenceBackend)
 					})
 					return
 				}
+				failure = "decode backend stream: " + err.Error()
 				_ = json.NewEncoder(s).Encode(&apiv1.InferenceStreamChunk{
 					RequestId:    req.GetRequestId(),
 					Done:         true,
@@ -108,16 +259,33 @@ func (r *Runtime) registerInferenceStreamHandler(backend streamInferenceBackend)
 				})
 				return
 			}
+			if !gotFirst {
+				gotFirst = true
+				sampleTTFT = time.Since(streamStarted)
+			}
 			if err := json.NewEncoder(s).Encode(&apiv1.InferenceStreamChunk{
-				RequestId: req.GetRequestId(),
-				Model:     chunk.Model,
-				Content:   chunk.Message.Content,
-				Done:      chunk.Done,
-				Ok:        true,
+				RequestId:  req.GetRequestId(),
+				Model:      chunk.Model,
+				Content:    chunk.Message.Content,
+				TokensUsed: int64(chunk.PromptEvalCount + chunk.EvalCount),
+				Done:       chunk.Done,
+				Ok:         true,
 			}); err != nil {
+				failure = "encode response chunk: " + err.Error()
+				if paymentSession != nil {
+					r.markAbortedStreamDebt(paymentSession)
+				}
 				return
 			}
 			if chunk.Done {
+				tokensUsed = int64(chunk.PromptEvalCount + chunk.EvalCount)
+				r.reconcileActualUsage(paymentSession, tokensUsed)
+				sampleTotal = time.Since(streamStarted)
+				if sampleTTFT <= 0 {
+					sampleTTFT = sampleTotal
+				}
+				haveSample = true
+				success = true
 				return
 			}
 		}
@@ -201,6 +369,9 @@ func (r *Runtime) InferRemote(ctx context.Context, target peer.ID, req *apiv1.In
 	}
 	if !resp.GetOk() {
 		if msg := resp.GetErrorMessage(); msg != "" {
+			if payErr, ok := decodePaymentRequiredEnvelope(msg); ok {
+				return nil, payErr
+			}
 			return nil, fmt.Errorf("remote inference failed: %s", msg)
 		}
 		return nil, fmt.Errorf("remote inference failed")
@@ -222,4 +393,52 @@ func (r *Runtime) InferRemoteStream(ctx context.Context, target peer.ID, req *ap
 	}
 	_ = s.CloseWrite()
 	return s, nil
+}
+
+func logInferenceEvent(fields map[string]any) {
+	raw, err := json.Marshal(sanitizeInferenceLogFields(fields))
+	if err != nil {
+		log.Printf("inference log marshal warning: %v", err)
+		return
+	}
+	log.Print(string(raw))
+}
+
+func sanitizeInferenceLogFields(fields map[string]any) map[string]any {
+	if fields == nil {
+		return nil
+	}
+	out := make(map[string]any, len(fields))
+	for k, v := range fields {
+		lk := strings.ToLower(strings.TrimSpace(k))
+		switch lk {
+		case "content", "message", "messages", "prompt", "prompt_text", "input":
+			out[k] = "[redacted]"
+			continue
+		case "error":
+			if s, ok := v.(string); ok {
+				out[k] = sanitizeInferenceLogError(s)
+				continue
+			}
+		}
+		out[k] = v
+	}
+	return out
+}
+
+func sanitizeInferenceLogError(msg string) string {
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return ""
+	}
+	lower := strings.ToLower(msg)
+	if strings.Contains(lower, `"messages"`) ||
+		strings.Contains(lower, `"content"`) ||
+		strings.Contains(lower, `"prompt"`) {
+		return "redacted_potential_prompt_data"
+	}
+	if len(msg) > 256 {
+		return msg[:256] + "...(truncated)"
+	}
+	return msg
 }

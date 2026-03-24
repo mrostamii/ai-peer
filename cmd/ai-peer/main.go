@@ -3,15 +3,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
-	"sort"
 	"slices"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -23,12 +27,15 @@ import (
 	"github.com/mrostamii/ai-peer/pkg/gateway"
 	"github.com/mrostamii/ai-peer/pkg/node"
 	"github.com/mrostamii/ai-peer/pkg/registry"
+	"github.com/mrostamii/ai-peer/pkg/x402client"
+	"github.com/mrostamii/ai-peer/pkg/x402spike"
 )
 
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("ai-peer")
 		fmt.Println("usage: ai-peer config-check -file ./node.yaml")
+		fmt.Println("usage: ai-peer pay chat -url http://127.0.0.1:8080/v1/chat/completions -model qwen2.5:3b -message \"say hi\"")
 		return
 	}
 
@@ -41,6 +48,8 @@ func main() {
 		runNetwork(os.Args[2:])
 	case "gateway":
 		runGateway(os.Args[2:])
+	case "pay":
+		runPay(os.Args[2:])
 	default:
 		fmt.Printf("unknown command: %s\n", os.Args[1])
 		os.Exit(2)
@@ -191,6 +200,19 @@ func runGatewayStart(args []string) {
 	file := fs.String("file", "./node.yaml", "path to node.yaml")
 	listen := fs.String("listen", "", "gateway listen address override")
 	ollamaBase := fs.String("ollama", "", "ollama base URL override (optional)")
+	localBackend := fs.Bool("local-backend", false, "enable local Ollama fallback in gateway (default false: remote-only routing)")
+	x402Mode := fs.String("x402-mode", "off", "x402 mode: off|managed (managed = gateway-owned paywall, off = decentralized routing only)")
+	x402Enable := fs.Bool("x402-enable", false, "enable x402 payment requirement for /v1/chat/completions")
+	x402Facilitator := fs.String("x402-facilitator", "", "x402 facilitator base URL (e.g. https://x402.org/facilitator)")
+	x402Network := fs.String("x402-network", "eip155:84532", "x402 network in CAIP-2 format")
+	x402Asset := fs.String("x402-asset", "0x036CbD53842c5426634e7929541eC2318f3dCF7e", "x402 payment asset address")
+	x402Amount := fs.String("x402-amount", "10000", "x402 payment amount in token atomic units")
+	x402PricePer1K := fs.Int64("x402-price-per-1k", 0, "dynamic pricing: token atomic units per 1K estimated tokens (0 disables dynamic pricing)")
+	x402MinAmount := fs.Int64("x402-min-amount", 1000, "dynamic pricing: minimum charge per request in token atomic units")
+	x402DefaultOutputTokens := fs.Int64("x402-default-output-tokens", 256, "dynamic pricing: fallback output token estimate when request.max_tokens is absent")
+	x402PayTo := fs.String("x402-payto", "", "x402 recipient wallet address")
+	x402TokenName := fs.String("x402-token-name", "USDC", "x402 token name for EIP-712 domain")
+	x402TokenVersion := fs.String("x402-token-version", "2", "x402 token version for EIP-712 domain")
 	_ = fs.Parse(args)
 
 	cfg, err := config.Load(*file)
@@ -297,10 +319,84 @@ func runGatewayStart(args []string) {
 	log.Printf("gateway start: listen=%s ollama=%s p2p=tcp/%d quic/%d (health topic %q)",
 		resolvedListen, resolvedOllama, cfg.Listen.TCPPort, cfg.Listen.QUICPort, node.HealthTopicID)
 	proxy := gateway.NewOpenAIProxy(resolvedListen, resolvedOllama, reg)
+	proxy.SetLocalBackendEnabled(*localBackend)
 	proxy.SetTimeouts(
 		time.Duration(cfg.Timeouts.FirstTokenSec)*time.Second,
 		time.Duration(cfg.Timeouts.TotalRequestSec)*time.Second,
 	)
+	mode := strings.ToLower(strings.TrimSpace(*x402Mode))
+	if mode == "" {
+		mode = "off"
+	}
+	if *x402Enable && mode == "off" {
+		// Backward compatibility: old scripts used -x402-enable only.
+		mode = "managed"
+		log.Printf("warning: -x402-enable is deprecated; use -x402-mode=managed")
+	}
+	if mode != "off" && mode != "managed" {
+		log.Fatalf("invalid -x402-mode %q (expected off|managed)", *x402Mode)
+	}
+
+	if mode == "managed" {
+		if strings.TrimSpace(*x402PayTo) == "" {
+			log.Fatalf("x402 managed mode requires -x402-payto")
+		}
+		paywallCfg := &gateway.X402PaywallConfig{
+			FacilitatorURL: strings.TrimSpace(*x402Facilitator),
+			Requirement: x402spike.PaymentRequirements{
+				Scheme:            "exact",
+				Network:           strings.TrimSpace(*x402Network),
+				Amount:            strings.TrimSpace(*x402Amount),
+				Asset:             strings.TrimSpace(*x402Asset),
+				PayTo:             strings.TrimSpace(*x402PayTo),
+				MaxTimeoutSeconds: 60,
+				Extra: map[string]any{
+					"name":    strings.TrimSpace(*x402TokenName),
+					"version": strings.TrimSpace(*x402TokenVersion),
+				},
+			},
+		}
+		modelPricingCfg := cfg.Models.ModelPricing
+		if len(modelPricingCfg) == 0 {
+			// Backward compatibility for older configs.
+			modelPricingCfg = cfg.Gateway.X402.ModelPricing
+		}
+		if len(modelPricingCfg) > 0 {
+			paywallCfg.ModelPricing = make(map[string]gateway.X402TokenPricingConfig, len(modelPricingCfg))
+			for model, mp := range modelPricingCfg {
+				paywallCfg.ModelPricing[model] = gateway.X402TokenPricingConfig{
+					AtomicPer1KTokens:   mp.PricePer1KAtomic,
+					MinAmountAtomic:     mp.MinAmountAtomic,
+					MaxAmountAtomic:     mp.MaxAmountAtomic,
+					DefaultOutputTokens: mp.DefaultOutputTokens,
+				}
+			}
+		}
+		if *x402PricePer1K > 0 {
+			paywallCfg.TokenPricing = &gateway.X402TokenPricingConfig{
+				AtomicPer1KTokens:   *x402PricePer1K,
+				MinAmountAtomic:     *x402MinAmount,
+				DefaultOutputTokens: *x402DefaultOutputTokens,
+			}
+		}
+		proxy.SetX402ChatPaywall(paywallCfg)
+		log.Printf("x402 paywall enabled for /v1/chat/completions network=%s amount=%s asset=%s payto=%s facilitator=%s dynamic_price_per_1k=%d min_amount=%d default_output_tokens=%d",
+			strings.TrimSpace(*x402Network),
+			strings.TrimSpace(*x402Amount),
+			strings.TrimSpace(*x402Asset),
+			strings.TrimSpace(*x402PayTo),
+			strings.TrimSpace(*x402Facilitator),
+			*x402PricePer1K,
+			*x402MinAmount,
+			*x402DefaultOutputTokens)
+	} else {
+		log.Printf("x402 gateway paywall mode=off (decentralized routing only)")
+	}
+	if *localBackend {
+		log.Printf("gateway local backend fallback enabled (mode=hybrid)")
+	} else {
+		log.Printf("gateway local backend fallback disabled (mode=remote-only)")
+	}
 	proxy.SetRemoteChatFunc(buildRemoteChatFunc(rt, cfg))
 	proxy.SetRemoteStreamChatFunc(buildRemoteStreamChatFunc(rt, cfg))
 	proxy.SetPeerLatencyFunc(func(ctx context.Context, nodeID string) (time.Duration, error) {
@@ -325,8 +421,12 @@ func buildRemoteChatFunc(rt *node.Runtime, cfg *config.Config) gateway.RemoteCha
 		if err != nil {
 			return nil, fmt.Errorf("decode target peer id: %w", err)
 		}
+		requestID := strings.TrimSpace(req.RequestID)
+		if requestID == "" {
+			requestID = fmt.Sprintf("req-%d", time.Now().UnixNano())
+		}
 		wireReq := &apiv1.InferenceRequest{
-			RequestId: fmt.Sprintf("req-%d", time.Now().UnixNano()),
+			RequestId: requestID,
 			Model:     req.Model,
 			Messages:  make([]*apiv1.ChatMessage, 0, len(req.Messages)),
 			Params:    map[string]string{},
@@ -340,12 +440,29 @@ func buildRemoteChatFunc(rt *node.Runtime, cfg *config.Config) gateway.RemoteCha
 		if req.Temperature != nil {
 			wireReq.Params["temperature"] = fmt.Sprintf("%g", *req.Temperature)
 		}
+		if req.MaxTokens != nil && *req.MaxTokens > 0 {
+			wireReq.Params["max_tokens"] = fmt.Sprintf("%d", *req.MaxTokens)
+		}
+		if s := strings.TrimSpace(req.PaymentSignature); s != "" {
+			wireReq.Params["payment_signature"] = s
+		}
+		if s := strings.TrimSpace(req.ResourceURL); s != "" {
+			wireReq.Params["x402_resource_url"] = s
+		}
 
 		// Fast path: try direct stream first to avoid per-request DHT lookups.
 		inferCtx, cancelInfer := context.WithTimeout(ctx, time.Duration(cfg.Timeouts.TotalRequestSec)*time.Second)
 		out, err := rt.InferRemote(inferCtx, targetID, wireReq)
 		cancelInfer()
 		if err != nil {
+			var payErr *node.PaymentRequiredError
+			if errors.As(err, &payErr) {
+				return nil, &gateway.RemotePaymentRequiredError{
+					Message:               payErr.Message,
+					PaymentRequiredHeader: payErr.PaymentRequiredHeader,
+					PaymentResponseHeader: payErr.PaymentResponseHeader,
+				}
+			}
 			// Fallback: resolve peer addrs via DHT, connect, then retry once.
 			providers, findErr := rt.FindModelProviders(ctx, req.Model, 32)
 			if findErr != nil {
@@ -371,6 +488,14 @@ func buildRemoteChatFunc(rt *node.Runtime, cfg *config.Config) gateway.RemoteCha
 			out, err = rt.InferRemote(retryCtx, targetID, wireReq)
 			cancelRetry()
 			if err != nil {
+				var payErr *node.PaymentRequiredError
+				if errors.As(err, &payErr) {
+					return nil, &gateway.RemotePaymentRequiredError{
+						Message:               payErr.Message,
+						PaymentRequiredHeader: payErr.PaymentRequiredHeader,
+						PaymentResponseHeader: payErr.PaymentResponseHeader,
+					}
+				}
 				return nil, fmt.Errorf("remote inference retry failed: %w", err)
 			}
 		}
@@ -401,8 +526,12 @@ func buildRemoteStreamChatFunc(rt *node.Runtime, cfg *config.Config) gateway.Rem
 		if err != nil {
 			return nil, fmt.Errorf("decode target peer id: %w", err)
 		}
+		requestID := strings.TrimSpace(req.RequestID)
+		if requestID == "" {
+			requestID = fmt.Sprintf("req-%d", time.Now().UnixNano())
+		}
 		wireReq := &apiv1.InferenceRequest{
-			RequestId: fmt.Sprintf("req-%d", time.Now().UnixNano()),
+			RequestId: requestID,
 			Model:     req.Model,
 			Messages:  make([]*apiv1.ChatMessage, 0, len(req.Messages)),
 			Params:    map[string]string{},
@@ -415,6 +544,15 @@ func buildRemoteStreamChatFunc(rt *node.Runtime, cfg *config.Config) gateway.Rem
 		}
 		if req.Temperature != nil {
 			wireReq.Params["temperature"] = fmt.Sprintf("%g", *req.Temperature)
+		}
+		if req.MaxTokens != nil && *req.MaxTokens > 0 {
+			wireReq.Params["max_tokens"] = fmt.Sprintf("%d", *req.MaxTokens)
+		}
+		if s := strings.TrimSpace(req.PaymentSignature); s != "" {
+			wireReq.Params["payment_signature"] = s
+		}
+		if s := strings.TrimSpace(req.ResourceURL); s != "" {
+			wireReq.Params["x402_resource_url"] = s
 		}
 
 		streamCtx, cancelStream := context.WithTimeout(ctx, time.Duration(cfg.Timeouts.TotalRequestSec)*time.Second)
@@ -592,4 +730,94 @@ func runNetworkModels(args []string) {
 	for _, m := range avail {
 		fmt.Printf("- model=%s providers=%d\n", m.Model, m.ProviderCount)
 	}
+}
+
+func runPay(args []string) {
+	if len(args) == 0 {
+		fmt.Println("usage: ai-peer pay chat -url http://127.0.0.1:8080/v1/chat/completions -model qwen2.5:3b -message \"say hi\"")
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "chat":
+		runPayChat(args[1:])
+	default:
+		fmt.Printf("unknown pay command: %s\n", args[0])
+		os.Exit(2)
+	}
+}
+
+func runPayChat(args []string) {
+	fs := flag.NewFlagSet("pay chat", flag.ExitOnError)
+	url := fs.String("url", "http://127.0.0.1:8080/v1/chat/completions", "chat completions endpoint URL")
+	model := fs.String("model", "qwen2.5:3b", "model name")
+	message := fs.String("message", "say hi", "user message content")
+	stream := fs.Bool("stream", true, "request streaming response")
+	maxTokens := fs.Int("max-tokens", 0, "optional max_tokens sent to provider for pricing/output cap")
+	privateKey := fs.String("private-key", "", "optional private key override")
+	_ = fs.Parse(args)
+
+	client, err := x402client.NewFromEnv()
+	if err != nil {
+		log.Fatalf("wallet error: %v", err)
+	}
+	if strings.TrimSpace(*privateKey) != "" {
+		client.PrivateKey = strings.TrimSpace(*privateKey)
+	}
+
+	body := map[string]any{
+		"model":  *model,
+		"stream": *stream,
+		"messages": []map[string]string{
+			{"role": "user", "content": *message},
+		},
+	}
+	if *maxTokens > 0 {
+		body["max_tokens"] = *maxTokens
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		log.Fatalf("request marshal error: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, *url, bytes.NewReader(raw))
+	if err != nil {
+		log.Fatalf("request create error: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.DoWithPayment(req)
+	if err != nil {
+		log.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if settleHeader := resp.Header.Get("PAYMENT-RESPONSE"); strings.TrimSpace(settleHeader) != "" {
+		var settle x402spike.SettlementResponse
+		if err := x402spike.DecodeBase64JSON(settleHeader, &settle); err == nil {
+			settleRaw, _ := json.MarshalIndent(settle, "", "  ")
+			log.Printf("payment settlement: %s", settleRaw)
+		}
+	}
+	if reqID := strings.TrimSpace(resp.Header.Get("X-AI-Peer-Request-ID")); reqID != "" {
+		fmt.Fprintf(os.Stderr, "request_id=%s\n", reqID)
+	}
+
+	if *stream {
+		if resp.StatusCode >= 400 {
+			respBody, _ := io.ReadAll(resp.Body)
+			log.Fatalf("status=%d body=%s", resp.StatusCode, string(respBody))
+		}
+		if _, err := io.Copy(os.Stdout, resp.Body); err != nil {
+			log.Fatalf("stream copy error: %v", err)
+		}
+		return
+	}
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Fatalf("read response error: %v", err)
+	}
+	if resp.StatusCode >= 400 {
+		log.Fatalf("status=%d body=%s", resp.StatusCode, string(respBody))
+	}
+	_, _ = os.Stdout.Write(respBody)
 }
