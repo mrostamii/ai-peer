@@ -1,6 +1,10 @@
 package node
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/mrostamii/ai-peer/pkg/config"
+)
 
 func TestParseBootstrapPeers(t *testing.T) {
 	t.Parallel()
@@ -22,5 +26,37 @@ func TestParseBootstrapPeersInvalid(t *testing.T) {
 	_, err := ParseBootstrapPeers([]string{"not-a-multiaddr"})
 	if err == nil {
 		t.Fatal("expected error for invalid multiaddr")
+	}
+}
+
+func TestResolveNATConfigDefaults(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{}
+	nc := resolveNATConfig(cfg, 1)
+	if !nc.TraversalEnabled {
+		t.Fatalf("TraversalEnabled=%v want true", nc.TraversalEnabled)
+	}
+	if nc.RelayServiceEnabled {
+		t.Fatalf("RelayServiceEnabled=%v want false", nc.RelayServiceEnabled)
+	}
+	if !nc.AutoRelayEnabled {
+		t.Fatalf("AutoRelayEnabled=%v want true", nc.AutoRelayEnabled)
+	}
+}
+
+func TestResolveNATConfigDisabled(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{}
+	cfg.Network.DisableNATTraversal = true
+	cfg.Network.EnableRelayService = true
+	nc := resolveNATConfig(cfg, 1)
+	if nc.TraversalEnabled {
+		t.Fatalf("TraversalEnabled=%v want false", nc.TraversalEnabled)
+	}
+	if !nc.RelayServiceEnabled {
+		t.Fatalf("RelayServiceEnabled=%v want true", nc.RelayServiceEnabled)
+	}
+	if nc.AutoRelayEnabled {
+		t.Fatalf("AutoRelayEnabled=%v want false", nc.AutoRelayEnabled)
 	}
 }

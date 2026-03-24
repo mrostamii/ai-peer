@@ -45,7 +45,9 @@ type Config struct {
 	} `yaml:"listen"`
 
 	Network struct {
-		BootstrapPeers []string `yaml:"bootstrap_peers"`
+		BootstrapPeers      []string `yaml:"bootstrap_peers"`
+		DisableNATTraversal bool     `yaml:"disable_nat_traversal"`
+		EnableRelayService  bool     `yaml:"enable_relay_service"`
 	} `yaml:"network"`
 
 	Backend struct {

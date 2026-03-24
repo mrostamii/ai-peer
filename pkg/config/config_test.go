@@ -139,3 +139,39 @@ models:
 		t.Fatalf("expected empty bootstrap peers to be allowed, got: %v", err)
 	}
 }
+
+func TestLoadNATOptions(t *testing.T) {
+	t.Parallel()
+	d := t.TempDir()
+	p := filepath.Join(d, "nat.yaml")
+	err := os.WriteFile(p, []byte(`node:
+  name: "x"
+listen:
+  tcp_port: 4001
+  quic_port: 4001
+network:
+  bootstrap_peers: []
+  disable_nat_traversal: true
+  enable_relay_service: true
+backend:
+  type: "ollama"
+  base_url: "http://127.0.0.1:11434"
+models:
+  advertised:
+    - "llama3.2:latest"
+`), 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.Network.DisableNATTraversal {
+		t.Fatalf("DisableNATTraversal=%v want true", cfg.Network.DisableNATTraversal)
+	}
+	if !cfg.Network.EnableRelayService {
+		t.Fatalf("EnableRelayService=%v want true", cfg.Network.EnableRelayService)
+	}
+}
