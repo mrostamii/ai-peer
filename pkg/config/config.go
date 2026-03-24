@@ -14,6 +14,8 @@ const (
 	defaultFirstTokenSec        = 30
 	defaultTotalRequestSec      = 120
 	defaultGatewayListenAddr    = "127.0.0.1:8080"
+	defaultBackendType          = "ollama"
+	defaultBackendBaseURL       = "http://127.0.0.1:11434"
 	defaultX402Network          = "eip155:84532"
 	defaultX402Asset            = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
 	defaultX402TokenName        = "USDC"
@@ -121,6 +123,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Gateway.Listen == "" {
 		c.Gateway.Listen = defaultGatewayListenAddr
+	}
+	if c.Backend.Type == "" {
+		c.Backend.Type = defaultBackendType
+	}
+	if c.Backend.BaseURL == "" {
+		c.Backend.BaseURL = defaultBackendBaseURL
 	}
 	if c.Node.X402.Network == "" {
 		c.Node.X402.Network = defaultX402Network

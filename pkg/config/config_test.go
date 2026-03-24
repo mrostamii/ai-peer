@@ -175,3 +175,34 @@ models:
 		t.Fatalf("EnableRelayService=%v want true", cfg.Network.EnableRelayService)
 	}
 }
+
+func TestLoadAppliesBackendDefaultsWhenMissing(t *testing.T) {
+	t.Parallel()
+	d := t.TempDir()
+	p := filepath.Join(d, "no-backend.yaml")
+	err := os.WriteFile(p, []byte(`node:
+  name: "x"
+listen:
+  tcp_port: 4001
+  quic_port: 4001
+network:
+  bootstrap_peers: []
+models:
+  advertised:
+    - "llama3.2:latest"
+`), 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Backend.Type != "ollama" {
+		t.Fatalf("backend.type=%q want ollama", cfg.Backend.Type)
+	}
+	if cfg.Backend.BaseURL != "http://127.0.0.1:11434" {
+		t.Fatalf("backend.base_url=%q want http://127.0.0.1:11434", cfg.Backend.BaseURL)
+	}
+}
