@@ -28,13 +28,15 @@ import (
 const bootstrapReconnectEvery = 30 * time.Second
 
 type Runtime struct {
-	host             host.Host
-	dht              *dht.IpfsDHT
-	bootstraps       []peer.AddrInfo
-	reconnect        bool
-	startedAt        time.Time
-	metricsSrv       *http.Server
-	inferencePaywall *x402InferencePaywallConfig
+	host               host.Host
+	dht                *dht.IpfsDHT
+	bootstraps         []peer.AddrInfo
+	reconnect          bool
+	startedAt          time.Time
+	metricsSrv         *http.Server
+	inferencePaywall   *x402InferencePaywallConfig
+	paymentDebtMu      sync.Mutex
+	paymentDebtByPayer map[string]int64
 
 	inflightInference atomic.Int64
 	statsMu           sync.RWMutex
@@ -108,11 +110,12 @@ func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 	}
 
 	r := &Runtime{
-		host:       h,
-		dht:        kdht,
-		bootstraps: bootstraps,
-		reconnect:  useCustomBootstraps,
-		startedAt:  time.Now(),
+		host:               h,
+		dht:                kdht,
+		bootstraps:         bootstraps,
+		reconnect:          useCustomBootstraps,
+		startedAt:          time.Now(),
+		paymentDebtByPayer: make(map[string]int64),
 	}
 	return r, nil
 }

@@ -106,3 +106,26 @@ func TestComputeInferenceRequirementIgnoresLowerClientMaxTokens(t *testing.T) {
 		t.Fatalf("low client max_tokens should not reduce charged amount, noMax=%s lowMax=%s", amountNoMax, amountLowMax)
 	}
 }
+
+func TestReconcileActualUsageAccruesDebt(t *testing.T) {
+	t.Parallel()
+	r := &Runtime{
+		paymentDebtByPayer: map[string]int64{},
+	}
+	session := &inferencePaymentSession{
+		Payer:           "0xabc",
+		Model:           "qwen2.5:3b",
+		PriorDebtAtomic: 0,
+		PrepaidAtomic:   1000,
+		Pricing: x402PricingConfig{
+			AtomicPer1KTokens:   10000,
+			MinAmountAtomic:     0,
+			DefaultOutputTokens: 256,
+		},
+	}
+	// 250 tokens -> 2500 atomic due, prepaid 1000 => 1500 debt.
+	r.reconcileActualUsage(session, 250)
+	if got := r.getPaymentDebt("0xabc"); got != 1500 {
+		t.Fatalf("debt=%d want 1500", got)
+	}
+}

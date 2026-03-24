@@ -40,6 +40,7 @@ func (r *Runtime) registerInferenceHandler(backend inferenceBackend) {
 		reqID := ""
 		model := ""
 		tokensUsed := int64(0)
+		var paymentSession *inferencePaymentSession
 		success := false
 		failure := ""
 		defer func() {
@@ -66,7 +67,7 @@ func (r *Runtime) registerInferenceHandler(backend inferenceBackend) {
 		}
 		reqID = req.GetRequestId()
 		model = req.GetModel()
-		if paymentErr, ok := r.enforceInferencePayment(&req); !ok {
+		if sess, paymentErr, ok := r.enforceInferencePayment(&req); !ok {
 			failure = "payment required"
 			_ = json.NewEncoder(s).Encode(&apiv1.InferenceResponse{
 				RequestId:    req.GetRequestId(),
@@ -74,6 +75,8 @@ func (r *Runtime) registerInferenceHandler(backend inferenceBackend) {
 				ErrorMessage: paymentErr,
 			})
 			return
+		} else {
+			paymentSession = sess
 		}
 		started := time.Now()
 		resp, err := inferWithBackend(context.Background(), backend, &req)
@@ -90,6 +93,7 @@ func (r *Runtime) registerInferenceHandler(backend inferenceBackend) {
 		// Unary backend responses do not expose TTFT, so use total duration as a proxy.
 		r.recordInferenceSample(total, total, resp.GetTokensUsed())
 		tokensUsed = resp.GetTokensUsed()
+		r.reconcileActualUsage(paymentSession, tokensUsed)
 		success = true
 		resp.LatencyMs = time.Since(started).Milliseconds()
 		if err := json.NewEncoder(s).Encode(resp); err != nil {
@@ -107,6 +111,7 @@ func (r *Runtime) registerInferenceStreamHandler(backend streamInferenceBackend)
 		reqID := ""
 		model := ""
 		tokensUsed := int64(0)
+		var paymentSession *inferencePaymentSession
 		success := false
 		failure := ""
 		var sampleTotal time.Duration
@@ -143,7 +148,7 @@ func (r *Runtime) registerInferenceStreamHandler(backend streamInferenceBackend)
 		}
 		reqID = req.GetRequestId()
 		model = req.GetModel()
-		if paymentErr, ok := r.enforceInferencePayment(&req); !ok {
+		if sess, paymentErr, ok := r.enforceInferencePayment(&req); !ok {
 			failure = "payment required"
 			_ = json.NewEncoder(s).Encode(&apiv1.InferenceStreamChunk{
 				RequestId:    req.GetRequestId(),
@@ -152,6 +157,8 @@ func (r *Runtime) registerInferenceStreamHandler(backend streamInferenceBackend)
 				ErrorMessage: paymentErr,
 			})
 			return
+		} else {
+			paymentSession = sess
 		}
 		rc, err := inferStreamWithBackend(context.Background(), backend, &req)
 		if err != nil {
@@ -221,6 +228,7 @@ func (r *Runtime) registerInferenceStreamHandler(backend streamInferenceBackend)
 			}
 			if chunk.Done {
 				tokensUsed = int64(chunk.PromptEvalCount + chunk.EvalCount)
+				r.reconcileActualUsage(paymentSession, tokensUsed)
 				sampleTotal = time.Since(streamStarted)
 				if sampleTTFT <= 0 {
 					sampleTTFT = sampleTotal

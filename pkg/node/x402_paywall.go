@@ -33,6 +33,14 @@ type x402PricingConfig struct {
 	DefaultOutputTokens int64
 }
 
+type inferencePaymentSession struct {
+	Payer           string
+	Model           string
+	PriorDebtAtomic int64
+	PrepaidAtomic   int64
+	Pricing         x402PricingConfig
+}
+
 type x402RemoteErrorEnvelope struct {
 	Code            string `json:"code"`
 	Message         string `json:"message"`
@@ -117,9 +125,9 @@ func buildAdvertisedModelPricing(cfg *config.Config) map[string]ModelPricingHint
 	return out
 }
 
-func (r *Runtime) enforceInferencePayment(req *apiv1.InferenceRequest) (string, bool) {
+func (r *Runtime) enforceInferencePayment(req *apiv1.InferenceRequest) (*inferencePaymentSession, string, bool) {
 	if r == nil || r.inferencePaywall == nil {
-		return "", true
+		return nil, "", true
 	}
 	paywall := r.inferencePaywall
 	resourceURL := "http://ai-peer.local/v1/chat/completions"
@@ -128,7 +136,7 @@ func (r *Runtime) enforceInferencePayment(req *apiv1.InferenceRequest) (string, 
 			resourceURL = got
 		}
 	}
-	requirement := computeInferenceRequirement(paywall, req)
+	requirement, quotedAmount := computeInferenceRequirementAndAmount(paywall, req)
 	paymentRequired := x402spike.PaymentRequired{
 		X402Version: 2,
 		Error:       "PAYMENT-SIGNATURE header is required",
@@ -146,26 +154,48 @@ func (r *Runtime) enforceInferencePayment(req *apiv1.InferenceRequest) (string, 
 		paymentHeader = strings.TrimSpace(req.GetParams()[inferenceParamPaymentSignature])
 	}
 	if paymentHeader == "" {
-		return encodePaymentRequiredEnvelope("PAYMENT-SIGNATURE header is required", paymentRequired, x402spike.SettlementResponse{}), false
+		return nil, encodePaymentRequiredEnvelope("PAYMENT-SIGNATURE header is required", paymentRequired, x402spike.SettlementResponse{}), false
 	}
 
 	var payload x402spike.PaymentPayload
 	if err := x402spike.DecodeBase64JSON(paymentHeader, &payload); err != nil {
 		paymentRequired.Error = "invalid PAYMENT-SIGNATURE header"
-		return encodePaymentRequiredEnvelope(paymentRequired.Error, paymentRequired, x402spike.SettlementResponse{}), false
+		return nil, encodePaymentRequiredEnvelope(paymentRequired.Error, paymentRequired, x402spike.SettlementResponse{}), false
 	}
-	if err := validateAcceptedPayment(payload.Accepted, requirement); err != nil {
+	payer := strings.ToLower(strings.TrimSpace(payload.Payload.Authorization.From))
+	priorDebt := r.getPaymentDebt(payer)
+	requirementWithDebt := requirement
+	if priorDebt > 0 {
+		totalWithDebt := quotedAmount + priorDebt
+		if totalWithDebt < 1 {
+			totalWithDebt = 1
+		}
+		requirementWithDebt.Amount = strconv.FormatInt(totalWithDebt, 10)
+		paymentRequired.Accepts = []x402spike.PaymentRequirements{requirementWithDebt}
+	}
+	if err := validateAcceptedPayment(payload.Accepted, requirementWithDebt); err != nil {
 		paymentRequired.Error = err.Error()
-		return encodePaymentRequiredEnvelope(paymentRequired.Error, paymentRequired, x402spike.SettlementResponse{}), false
+		return nil, encodePaymentRequiredEnvelope(paymentRequired.Error, paymentRequired, x402spike.SettlementResponse{}), false
+	}
+	prepaidAtomic, err := strconv.ParseInt(strings.TrimSpace(payload.Accepted.Amount), 10, 64)
+	if err != nil || prepaidAtomic <= 0 {
+		paymentRequired.Error = "invalid PAYMENT-SIGNATURE amount"
+		return nil, encodePaymentRequiredEnvelope(paymentRequired.Error, paymentRequired, x402spike.SettlementResponse{}), false
 	}
 
 	if strings.TrimSpace(paywall.FacilitatorURL) == "" {
-		return "", true
+		return &inferencePaymentSession{
+			Payer:           payer,
+			Model:           strings.TrimSpace(req.GetModel()),
+			PriorDebtAtomic: priorDebt,
+			PrepaidAtomic:   prepaidAtomic,
+			Pricing:         resolveInferencePricing(paywall, req),
+		}, "", true
 	}
-	settle, _, _, err := settleWithFacilitator(paywall.FacilitatorURL, payload, requirement)
+	settle, _, _, err := settleWithFacilitator(paywall.FacilitatorURL, payload, requirementWithDebt)
 	if err != nil {
 		paymentRequired.Error = "facilitator error: " + err.Error()
-		return encodePaymentRequiredEnvelope(paymentRequired.Error, paymentRequired, x402spike.SettlementResponse{}), false
+		return nil, encodePaymentRequiredEnvelope(paymentRequired.Error, paymentRequired, x402spike.SettlementResponse{}), false
 	}
 	if !settle.Success {
 		if strings.TrimSpace(settle.ErrorReason) != "" {
@@ -173,17 +203,28 @@ func (r *Runtime) enforceInferencePayment(req *apiv1.InferenceRequest) (string, 
 		} else {
 			paymentRequired.Error = "payment settlement failed"
 		}
-		return encodePaymentRequiredEnvelope(paymentRequired.Error, paymentRequired, settle), false
+		return nil, encodePaymentRequiredEnvelope(paymentRequired.Error, paymentRequired, settle), false
 	}
-	return "", true
+	return &inferencePaymentSession{
+		Payer:           payer,
+		Model:           strings.TrimSpace(req.GetModel()),
+		PriorDebtAtomic: priorDebt,
+		PrepaidAtomic:   prepaidAtomic,
+		Pricing:         resolveInferencePricing(paywall, req),
+	}, "", true
 }
 
 func computeInferenceRequirement(paywall *x402InferencePaywallConfig, req *apiv1.InferenceRequest) x402spike.PaymentRequirements {
+	reqOut, _ := computeInferenceRequirementAndAmount(paywall, req)
+	return reqOut
+}
+
+func computeInferenceRequirementAndAmount(paywall *x402InferencePaywallConfig, req *apiv1.InferenceRequest) (x402spike.PaymentRequirements, int64) {
 	requirement := paywall.Requirement
 	pricing := resolveInferencePricing(paywall, req)
 	if pricing.AtomicPer1KTokens <= 0 {
 		requirement.Amount = "1"
-		return requirement
+		return requirement, 1
 	}
 	inputTokens := estimateInferenceInputTokens(req)
 	outputTokens := pricing.DefaultOutputTokens
@@ -212,7 +253,7 @@ func computeInferenceRequirement(paywall *x402InferencePaywallConfig, req *apiv1
 		amount = 1
 	}
 	requirement.Amount = strconv.FormatInt(amount, 10)
-	return requirement
+	return requirement, amount
 }
 
 func resolveInferencePricing(paywall *x402InferencePaywallConfig, req *apiv1.InferenceRequest) x402PricingConfig {
@@ -369,4 +410,67 @@ func validateAcceptedPayment(got, want x402spike.PaymentRequirements) error {
 		return fmt.Errorf("PAYMENT-SIGNATURE accepted requirement mismatch")
 	}
 	return nil
+}
+
+func (r *Runtime) getPaymentDebt(payer string) int64 {
+	payer = strings.ToLower(strings.TrimSpace(payer))
+	if r == nil || payer == "" {
+		return 0
+	}
+	r.paymentDebtMu.Lock()
+	defer r.paymentDebtMu.Unlock()
+	return r.paymentDebtByPayer[payer]
+}
+
+func (r *Runtime) setPaymentDebt(payer string, debt int64) {
+	payer = strings.ToLower(strings.TrimSpace(payer))
+	if r == nil || payer == "" {
+		return
+	}
+	if debt < 0 {
+		debt = 0
+	}
+	r.paymentDebtMu.Lock()
+	defer r.paymentDebtMu.Unlock()
+	if debt == 0 {
+		delete(r.paymentDebtByPayer, payer)
+		return
+	}
+	r.paymentDebtByPayer[payer] = debt
+}
+
+func (r *Runtime) reconcileActualUsage(session *inferencePaymentSession, tokensUsed int64) {
+	if r == nil || session == nil || session.Payer == "" {
+		return
+	}
+	if session.Pricing.AtomicPer1KTokens <= 0 {
+		return
+	}
+	if tokensUsed < 1 {
+		tokensUsed = 1
+	}
+	actualDue := (tokensUsed*session.Pricing.AtomicPer1KTokens + 999) / 1000
+	if session.Pricing.MinAmountAtomic > 0 && actualDue < session.Pricing.MinAmountAtomic {
+		actualDue = session.Pricing.MinAmountAtomic
+	}
+	if actualDue < 1 {
+		actualDue = 1
+	}
+	outstanding := session.PriorDebtAtomic + actualDue - session.PrepaidAtomic
+	if outstanding < 0 {
+		outstanding = 0
+	}
+	r.setPaymentDebt(session.Payer, outstanding)
+	if outstanding > 0 {
+		logInferenceEvent(map[string]any{
+			"event":             "x402_payment_underpaid",
+			"payer":             session.Payer,
+			"model":             session.Model,
+			"prepaid_atomic":    session.PrepaidAtomic,
+			"actual_due_atomic": actualDue,
+			"prior_debt_atomic": session.PriorDebtAtomic,
+			"new_debt_atomic":   outstanding,
+			"tokens_used":       tokensUsed,
+		})
+	}
 }
