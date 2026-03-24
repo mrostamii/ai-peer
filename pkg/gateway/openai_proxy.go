@@ -846,12 +846,72 @@ func (p *OpenAIProxy) writeSSEChunk(w io.Writer, flusher http.Flusher, id string
 }
 
 func (p *OpenAIProxy) logRequest(fields map[string]any) {
-	raw, err := json.Marshal(fields)
+	raw, err := json.Marshal(sanitizeLogFields(fields))
 	if err != nil {
 		log.Printf("gateway log marshal error: %v", err)
 		return
 	}
 	log.Print(string(raw))
+}
+
+func sanitizeLogFields(fields map[string]any) map[string]any {
+	if fields == nil {
+		return nil
+	}
+	out := make(map[string]any, len(fields))
+	for k, v := range fields {
+		lk := strings.ToLower(strings.TrimSpace(k))
+		switch lk {
+		case "content", "message", "messages", "prompt", "prompt_text", "input":
+			out[k] = "[redacted]"
+			continue
+		case "error":
+			if s, ok := v.(string); ok {
+				out[k] = sanitizeLogError(s)
+				continue
+			}
+		}
+		out[k] = sanitizeLogValue(v)
+	}
+	return out
+}
+
+func sanitizeLogValue(v any) any {
+	switch vv := v.(type) {
+	case map[string]any:
+		return sanitizeLogFields(vv)
+	case []any:
+		out := make([]any, 0, len(vv))
+		for _, item := range vv {
+			out = append(out, sanitizeLogValue(item))
+		}
+		return out
+	case []map[string]any:
+		out := make([]any, 0, len(vv))
+		for _, item := range vv {
+			out = append(out, sanitizeLogFields(item))
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+func sanitizeLogError(msg string) string {
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return ""
+	}
+	lower := strings.ToLower(msg)
+	if strings.Contains(lower, `"messages"`) ||
+		strings.Contains(lower, `"content"`) ||
+		strings.Contains(lower, `"prompt"`) {
+		return "redacted_potential_prompt_data"
+	}
+	if len(msg) > 256 {
+		return msg[:256] + "...(truncated)"
+	}
+	return msg
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) error {

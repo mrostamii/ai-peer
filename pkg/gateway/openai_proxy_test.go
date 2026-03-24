@@ -673,3 +673,42 @@ func TestHandleChatCompletionsWithPaymentAndFacilitator(t *testing.T) {
 		t.Fatalf("expected paid response body, got: %s", string(body))
 	}
 }
+
+func TestHandleChatCompletionsDoesNotLogPromptOnUpstreamError(t *testing.T) {
+	t.Parallel()
+	const promptSecret = "TOP_SECRET_PROMPT_TEXT_123"
+
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":"invalid request","messages":[{"role":"user","content":"`+promptSecret+`"}]}`)
+	}))
+	defer ollama.Close()
+
+	p := NewOpenAIProxy("127.0.0.1:0", ollama.URL, nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"llama3.2:latest",
+		"messages":[{"role":"user","content":"`+promptSecret+`"}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	var logs bytes.Buffer
+	prevWriter := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(prevWriter)
+
+	p.handleChatCompletions(rr, req)
+	res := rr.Result()
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected status 502, got %d", res.StatusCode)
+	}
+
+	logOut := logs.String()
+	if !strings.Contains(logOut, `"event":"inference_request"`) {
+		t.Fatalf("expected inference request log, got: %s", logOut)
+	}
+	if strings.Contains(logOut, promptSecret) {
+		t.Fatalf("prompt text leaked in logs: %s", logOut)
+	}
+}

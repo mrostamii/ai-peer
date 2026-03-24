@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/network"
@@ -314,10 +315,49 @@ func (r *Runtime) InferRemoteStream(ctx context.Context, target peer.ID, req *ap
 }
 
 func logInferenceEvent(fields map[string]any) {
-	raw, err := json.Marshal(fields)
+	raw, err := json.Marshal(sanitizeInferenceLogFields(fields))
 	if err != nil {
 		log.Printf("inference log marshal warning: %v", err)
 		return
 	}
 	log.Print(string(raw))
+}
+
+func sanitizeInferenceLogFields(fields map[string]any) map[string]any {
+	if fields == nil {
+		return nil
+	}
+	out := make(map[string]any, len(fields))
+	for k, v := range fields {
+		lk := strings.ToLower(strings.TrimSpace(k))
+		switch lk {
+		case "content", "message", "messages", "prompt", "prompt_text", "input":
+			out[k] = "[redacted]"
+			continue
+		case "error":
+			if s, ok := v.(string); ok {
+				out[k] = sanitizeInferenceLogError(s)
+				continue
+			}
+		}
+		out[k] = v
+	}
+	return out
+}
+
+func sanitizeInferenceLogError(msg string) string {
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return ""
+	}
+	lower := strings.ToLower(msg)
+	if strings.Contains(lower, `"messages"`) ||
+		strings.Contains(lower, `"content"`) ||
+		strings.Contains(lower, `"prompt"`) {
+		return "redacted_potential_prompt_data"
+	}
+	if len(msg) > 256 {
+		return msg[:256] + "...(truncated)"
+	}
+	return msg
 }
