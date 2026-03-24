@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/mrostamii/ai-peer/pkg/apiv1"
 	"github.com/mrostamii/ai-peer/pkg/registry"
+	"github.com/mrostamii/ai-peer/pkg/x402spike"
 )
 
 type OpenAIProxy struct {
@@ -37,10 +39,13 @@ type RemoteChatMessage struct {
 }
 
 type RemoteChatRequest struct {
-	RequestID   string
-	Model       string
-	Messages    []RemoteChatMessage
-	Temperature *float64
+	RequestID        string
+	Model            string
+	Messages         []RemoteChatMessage
+	MaxTokens        *int
+	Temperature      *float64
+	PaymentSignature string
+	ResourceURL      string
 }
 
 type RemoteChatResponse struct {
@@ -52,6 +57,22 @@ type RemoteChatResponse struct {
 type RemoteChatFunc func(context.Context, string, *RemoteChatRequest) (*RemoteChatResponse, error)
 type RemoteStreamChatFunc func(context.Context, string, *RemoteChatRequest) (io.ReadCloser, error)
 type PeerLatencyFunc func(context.Context, string) (time.Duration, error)
+
+type RemotePaymentRequiredError struct {
+	Message               string
+	PaymentRequiredHeader string
+	PaymentResponseHeader string
+}
+
+func (e *RemotePaymentRequiredError) Error() string {
+	if e == nil {
+		return "remote payment required"
+	}
+	if strings.TrimSpace(e.Message) == "" {
+		return "remote payment required"
+	}
+	return e.Message
+}
 
 // NewOpenAIProxy serves OpenAI-shaped HTTP. If reg is non-nil, GET /v1/network/nodes
 // returns peers learned from gossip health messages.
@@ -212,9 +233,6 @@ func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 	requestID := fmt.Sprintf("gw-%d", time.Now().UnixNano())
 	w.Header().Set("X-AI-Peer-Request-ID", requestID)
 	r.Header.Set("X-AI-Peer-Request-ID", requestID)
-	if !p.enforceChatPayment(w, r) {
-		return
-	}
 	if ct := r.Header.Get("Content-Type"); !strings.Contains(strings.ToLower(ct), "application/json") {
 		_ = writeJSON(w, http.StatusUnsupportedMediaType, openAIError(http.StatusUnsupportedMediaType, "expected application/json body"))
 		return
@@ -231,6 +249,9 @@ func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 	}
 	if len(oreq.Messages) == 0 {
 		_ = writeJSON(w, http.StatusBadRequest, openAIError(http.StatusBadRequest, "missing messages"))
+		return
+	}
+	if !p.enforceChatPayment(w, r, &oreq) {
 		return
 	}
 	if oreq.Stream {
@@ -263,10 +284,13 @@ func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 		nodes = p.reorderNodesByPing(r.Context(), nodes)
 		if len(nodes) > 0 {
 			remoteReq := &RemoteChatRequest{
-				RequestID:   requestID,
-				Model:       oreq.Model,
-				Messages:    make([]RemoteChatMessage, 0, len(oreq.Messages)),
-				Temperature: oreq.Temperature,
+				RequestID:        requestID,
+				Model:            oreq.Model,
+				MaxTokens:        oreq.MaxTokens,
+				Messages:         make([]RemoteChatMessage, 0, len(oreq.Messages)),
+				Temperature:      oreq.Temperature,
+				PaymentSignature: strings.TrimSpace(r.Header.Get("PAYMENT-SIGNATURE")),
+				ResourceURL:      requestURL(r),
 			}
 			for _, msg := range oreq.Messages {
 				remoteReq.Messages = append(remoteReq.Messages, RemoteChatMessage{
@@ -281,6 +305,13 @@ func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 				selectedNode = node.NodeID
 				resp, err := p.remoteChat(reqCtx, node.NodeID, remoteReq)
 				if err != nil {
+					var payErr *RemotePaymentRequiredError
+					if errors.As(err, &payErr) {
+						failure = payErr.Error()
+						if p.writeRemotePaymentRequired(w, payErr) {
+							return
+						}
+					}
 					failure = err.Error()
 					continue
 				}
@@ -371,9 +402,12 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 			selectedNode = node.NodeID
 			attemptStarted := time.Now()
 			rc, err := p.remoteStreamChat(reqCtx, node.NodeID, &RemoteChatRequest{
-				RequestID:   requestID,
-				Model:       oreq.Model,
-				Temperature: oreq.Temperature,
+				RequestID:        requestID,
+				Model:            oreq.Model,
+				MaxTokens:        oreq.MaxTokens,
+				Temperature:      oreq.Temperature,
+				PaymentSignature: strings.TrimSpace(r.Header.Get("PAYMENT-SIGNATURE")),
+				ResourceURL:      requestURL(r),
 				Messages: func() []RemoteChatMessage {
 					out := make([]RemoteChatMessage, 0, len(oreq.Messages))
 					for _, m := range oreq.Messages {
@@ -383,6 +417,13 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 				}(),
 			})
 			if err != nil {
+				var payErr *RemotePaymentRequiredError
+				if errors.As(err, &payErr) {
+					failure = payErr.Error()
+					if p.writeRemotePaymentRequired(w, payErr) {
+						return
+					}
+				}
 				failure = err.Error()
 				continue
 			}
@@ -399,6 +440,16 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 				failure = err.Error()
 				continue
 			}
+			if !first.GetOk() {
+				if payErr, ok := decodeRemotePaymentRequiredError(first.GetErrorMessage()); ok {
+					failure = payErr.Error()
+					if p.writeRemotePaymentRequired(w, payErr) {
+						return
+					}
+				}
+				failure = first.GetErrorMessage()
+				continue
+			}
 
 			flusher, ok := w.(http.Flusher)
 			if !ok {
@@ -410,12 +461,6 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 			w.Header().Set("Cache-Control", "no-cache")
 			w.Header().Set("Connection", "keep-alive")
 			w.WriteHeader(http.StatusOK)
-			if !first.GetOk() {
-				failure = first.GetErrorMessage()
-				_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
-				flusher.Flush()
-				return
-			}
 			if model == "" && first.GetModel() != "" {
 				model = first.GetModel()
 			}
@@ -596,6 +641,48 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 	flusher.Flush()
 }
 
+func decodeRemotePaymentRequiredError(msg string) (*RemotePaymentRequiredError, bool) {
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return nil, false
+	}
+	var env struct {
+		Code            string `json:"code"`
+		Message         string `json:"message"`
+		PaymentRequired string `json:"payment_required"`
+		PaymentResponse string `json:"payment_response"`
+	}
+	if err := json.Unmarshal([]byte(msg), &env); err != nil {
+		return nil, false
+	}
+	if env.Code != "payment_required" || strings.TrimSpace(env.PaymentRequired) == "" {
+		return nil, false
+	}
+	return &RemotePaymentRequiredError{
+		Message:               env.Message,
+		PaymentRequiredHeader: env.PaymentRequired,
+		PaymentResponseHeader: env.PaymentResponse,
+	}, true
+}
+
+func (p *OpenAIProxy) writeRemotePaymentRequired(w http.ResponseWriter, payErr *RemotePaymentRequiredError) bool {
+	if payErr == nil || strings.TrimSpace(payErr.PaymentRequiredHeader) == "" {
+		return false
+	}
+	var pr x402spike.PaymentRequired
+	if err := x402spike.DecodeBase64JSON(payErr.PaymentRequiredHeader, &pr); err != nil {
+		return false
+	}
+	var settle x402spike.SettlementResponse
+	if strings.TrimSpace(payErr.PaymentResponseHeader) != "" {
+		if err := x402spike.DecodeBase64JSON(payErr.PaymentResponseHeader, &settle); err != nil {
+			settle = x402spike.SettlementResponse{}
+		}
+	}
+	writePaymentRequired(w, pr, settle)
+	return true
+}
+
 func (p *OpenAIProxy) reorderNodesByPing(ctx context.Context, nodes []registry.NodeRecord) []registry.NodeRecord {
 	if p.peerLatency == nil || len(nodes) < 2 {
 		return nodes
@@ -687,6 +774,7 @@ type openAIChatRequest struct {
 	Model       string              `json:"model"`
 	Messages    []openAIChatMessage `json:"messages"`
 	Stream      bool                `json:"stream"`
+	MaxTokens   *int                `json:"max_tokens,omitempty"`
 	Temperature *float64            `json:"temperature,omitempty"`
 }
 

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -199,11 +200,15 @@ func runGatewayStart(args []string) {
 	file := fs.String("file", "./node.yaml", "path to node.yaml")
 	listen := fs.String("listen", "", "gateway listen address override")
 	ollamaBase := fs.String("ollama", "", "ollama base URL override (optional)")
+	x402Mode := fs.String("x402-mode", "off", "x402 mode: off|managed (managed = gateway-owned paywall, off = decentralized routing only)")
 	x402Enable := fs.Bool("x402-enable", false, "enable x402 payment requirement for /v1/chat/completions")
 	x402Facilitator := fs.String("x402-facilitator", "", "x402 facilitator base URL (e.g. https://x402.org/facilitator)")
 	x402Network := fs.String("x402-network", "eip155:84532", "x402 network in CAIP-2 format")
 	x402Asset := fs.String("x402-asset", "0x036CbD53842c5426634e7929541eC2318f3dCF7e", "x402 payment asset address")
 	x402Amount := fs.String("x402-amount", "10000", "x402 payment amount in token atomic units")
+	x402PricePer1K := fs.Int64("x402-price-per-1k", 0, "dynamic pricing: token atomic units per 1K estimated tokens (0 disables dynamic pricing)")
+	x402MinAmount := fs.Int64("x402-min-amount", 1000, "dynamic pricing: minimum charge per request in token atomic units")
+	x402DefaultOutputTokens := fs.Int64("x402-default-output-tokens", 256, "dynamic pricing: fallback output token estimate when request.max_tokens is absent")
 	x402PayTo := fs.String("x402-payto", "", "x402 recipient wallet address")
 	x402TokenName := fs.String("x402-token-name", "USDC", "x402 token name for EIP-712 domain")
 	x402TokenVersion := fs.String("x402-token-version", "2", "x402 token version for EIP-712 domain")
@@ -317,11 +322,24 @@ func runGatewayStart(args []string) {
 		time.Duration(cfg.Timeouts.FirstTokenSec)*time.Second,
 		time.Duration(cfg.Timeouts.TotalRequestSec)*time.Second,
 	)
-	if *x402Enable {
+	mode := strings.ToLower(strings.TrimSpace(*x402Mode))
+	if mode == "" {
+		mode = "off"
+	}
+	if *x402Enable && mode == "off" {
+		// Backward compatibility: old scripts used -x402-enable only.
+		mode = "managed"
+		log.Printf("warning: -x402-enable is deprecated; use -x402-mode=managed")
+	}
+	if mode != "off" && mode != "managed" {
+		log.Fatalf("invalid -x402-mode %q (expected off|managed)", *x402Mode)
+	}
+
+	if mode == "managed" {
 		if strings.TrimSpace(*x402PayTo) == "" {
-			log.Fatalf("x402 enabled but -x402-payto is empty")
+			log.Fatalf("x402 managed mode requires -x402-payto")
 		}
-		proxy.SetX402ChatPaywall(&gateway.X402PaywallConfig{
+		paywallCfg := &gateway.X402PaywallConfig{
 			FacilitatorURL: strings.TrimSpace(*x402Facilitator),
 			Requirement: x402spike.PaymentRequirements{
 				Scheme:            "exact",
@@ -335,13 +353,42 @@ func runGatewayStart(args []string) {
 					"version": strings.TrimSpace(*x402TokenVersion),
 				},
 			},
-		})
-		log.Printf("x402 paywall enabled for /v1/chat/completions network=%s amount=%s asset=%s payto=%s facilitator=%s",
+		}
+		modelPricingCfg := cfg.Models.ModelPricing
+		if len(modelPricingCfg) == 0 {
+			// Backward compatibility for older configs.
+			modelPricingCfg = cfg.Gateway.X402.ModelPricing
+		}
+		if len(modelPricingCfg) > 0 {
+			paywallCfg.ModelPricing = make(map[string]gateway.X402TokenPricingConfig, len(modelPricingCfg))
+			for model, mp := range modelPricingCfg {
+				paywallCfg.ModelPricing[model] = gateway.X402TokenPricingConfig{
+					AtomicPer1KTokens:   mp.PricePer1KAtomic,
+					MinAmountAtomic:     mp.MinAmountAtomic,
+					MaxAmountAtomic:     mp.MaxAmountAtomic,
+					DefaultOutputTokens: mp.DefaultOutputTokens,
+				}
+			}
+		}
+		if *x402PricePer1K > 0 {
+			paywallCfg.TokenPricing = &gateway.X402TokenPricingConfig{
+				AtomicPer1KTokens:   *x402PricePer1K,
+				MinAmountAtomic:     *x402MinAmount,
+				DefaultOutputTokens: *x402DefaultOutputTokens,
+			}
+		}
+		proxy.SetX402ChatPaywall(paywallCfg)
+		log.Printf("x402 paywall enabled for /v1/chat/completions network=%s amount=%s asset=%s payto=%s facilitator=%s dynamic_price_per_1k=%d min_amount=%d default_output_tokens=%d",
 			strings.TrimSpace(*x402Network),
 			strings.TrimSpace(*x402Amount),
 			strings.TrimSpace(*x402Asset),
 			strings.TrimSpace(*x402PayTo),
-			strings.TrimSpace(*x402Facilitator))
+			strings.TrimSpace(*x402Facilitator),
+			*x402PricePer1K,
+			*x402MinAmount,
+			*x402DefaultOutputTokens)
+	} else {
+		log.Printf("x402 gateway paywall mode=off (decentralized routing only)")
 	}
 	proxy.SetRemoteChatFunc(buildRemoteChatFunc(rt, cfg))
 	proxy.SetRemoteStreamChatFunc(buildRemoteStreamChatFunc(rt, cfg))
@@ -386,12 +433,29 @@ func buildRemoteChatFunc(rt *node.Runtime, cfg *config.Config) gateway.RemoteCha
 		if req.Temperature != nil {
 			wireReq.Params["temperature"] = fmt.Sprintf("%g", *req.Temperature)
 		}
+		if req.MaxTokens != nil && *req.MaxTokens > 0 {
+			wireReq.Params["max_tokens"] = fmt.Sprintf("%d", *req.MaxTokens)
+		}
+		if s := strings.TrimSpace(req.PaymentSignature); s != "" {
+			wireReq.Params["payment_signature"] = s
+		}
+		if s := strings.TrimSpace(req.ResourceURL); s != "" {
+			wireReq.Params["x402_resource_url"] = s
+		}
 
 		// Fast path: try direct stream first to avoid per-request DHT lookups.
 		inferCtx, cancelInfer := context.WithTimeout(ctx, time.Duration(cfg.Timeouts.TotalRequestSec)*time.Second)
 		out, err := rt.InferRemote(inferCtx, targetID, wireReq)
 		cancelInfer()
 		if err != nil {
+			var payErr *node.PaymentRequiredError
+			if errors.As(err, &payErr) {
+				return nil, &gateway.RemotePaymentRequiredError{
+					Message:               payErr.Message,
+					PaymentRequiredHeader: payErr.PaymentRequiredHeader,
+					PaymentResponseHeader: payErr.PaymentResponseHeader,
+				}
+			}
 			// Fallback: resolve peer addrs via DHT, connect, then retry once.
 			providers, findErr := rt.FindModelProviders(ctx, req.Model, 32)
 			if findErr != nil {
@@ -417,6 +481,14 @@ func buildRemoteChatFunc(rt *node.Runtime, cfg *config.Config) gateway.RemoteCha
 			out, err = rt.InferRemote(retryCtx, targetID, wireReq)
 			cancelRetry()
 			if err != nil {
+				var payErr *node.PaymentRequiredError
+				if errors.As(err, &payErr) {
+					return nil, &gateway.RemotePaymentRequiredError{
+						Message:               payErr.Message,
+						PaymentRequiredHeader: payErr.PaymentRequiredHeader,
+						PaymentResponseHeader: payErr.PaymentResponseHeader,
+					}
+				}
 				return nil, fmt.Errorf("remote inference retry failed: %w", err)
 			}
 		}
@@ -465,6 +537,15 @@ func buildRemoteStreamChatFunc(rt *node.Runtime, cfg *config.Config) gateway.Rem
 		}
 		if req.Temperature != nil {
 			wireReq.Params["temperature"] = fmt.Sprintf("%g", *req.Temperature)
+		}
+		if req.MaxTokens != nil && *req.MaxTokens > 0 {
+			wireReq.Params["max_tokens"] = fmt.Sprintf("%d", *req.MaxTokens)
+		}
+		if s := strings.TrimSpace(req.PaymentSignature); s != "" {
+			wireReq.Params["payment_signature"] = s
+		}
+		if s := strings.TrimSpace(req.ResourceURL); s != "" {
+			wireReq.Params["x402_resource_url"] = s
 		}
 
 		streamCtx, cancelStream := context.WithTimeout(ctx, time.Duration(cfg.Timeouts.TotalRequestSec)*time.Second)

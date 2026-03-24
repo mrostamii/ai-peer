@@ -55,13 +55,18 @@ When `-facilitator` is omitted, provider still validates protocol flow but retur
 
 ## Gateway Integration (ai-peer)
 
-`ai-peer gateway start` now supports an optional x402 paywall for `POST /v1/chat/completions`.
+`ai-peer gateway start` supports an optional **managed** x402 mode for
+`POST /v1/chat/completions`.
+
+Default mode is `off` (decentralized routing-only). In `managed` mode, the
+gateway itself enforces x402 (useful for aggregator deployments, not for
+provider-owned settlement).
 
 Example:
 
 ```bash
 go run ./cmd/ai-peer gateway start -file ./node.yaml \
-  -x402-enable \
+  -x402-mode managed \
   -x402-facilitator https://x402.org/facilitator \
   -x402-network eip155:84532 \
   -x402-asset 0x036CbD53842c5426634e7929541eC2318f3dCF7e \
@@ -71,7 +76,7 @@ go run ./cmd/ai-peer gateway start -file ./node.yaml \
   -x402-token-version 2
 ```
 
-When enabled:
+When `-x402-mode managed` is enabled:
 
 - requests without `PAYMENT-SIGNATURE` get `402` + `PAYMENT-REQUIRED`
 - valid paid retries proceed to inference and receive `PAYMENT-RESPONSE`

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,6 +15,19 @@ import (
 type X402PaywallConfig struct {
 	FacilitatorURL string
 	Requirement    x402spike.PaymentRequirements
+	TokenPricing   *X402TokenPricingConfig
+	ModelPricing   map[string]X402TokenPricingConfig
+}
+
+type X402TokenPricingConfig struct {
+	// AtomicPer1KTokens is the price in token atomic units per 1K estimated tokens.
+	AtomicPer1KTokens int64
+	// MinAmountAtomic is the minimum amount charged per request in atomic units.
+	MinAmountAtomic int64
+	// MaxAmountAtomic is the maximum amount charged per request in atomic units.
+	MaxAmountAtomic int64
+	// DefaultOutputTokens is used when max_tokens is not provided by the client.
+	DefaultOutputTokens int64
 }
 
 type x402VerifyRequest struct {
@@ -32,13 +46,14 @@ func (p *OpenAIProxy) SetX402ChatPaywall(cfg *X402PaywallConfig) {
 	p.chatPaywall = cfg
 }
 
-func (p *OpenAIProxy) enforceChatPayment(w http.ResponseWriter, r *http.Request) bool {
+func (p *OpenAIProxy) enforceChatPayment(w http.ResponseWriter, r *http.Request, oreq *openAIChatRequest) bool {
 	if p.chatPaywall == nil {
 		return true
 	}
 	started := time.Now()
 	reqURL := requestURL(r)
 	requestID := strings.TrimSpace(r.Header.Get("X-AI-Peer-Request-ID"))
+	requirement, inputTokens, outputTokens, totalTokens := p.computePaymentRequirement(oreq)
 	paymentRequired := x402spike.PaymentRequired{
 		X402Version: 2,
 		Error:       "PAYMENT-SIGNATURE header is required",
@@ -47,7 +62,7 @@ func (p *OpenAIProxy) enforceChatPayment(w http.ResponseWriter, r *http.Request)
 			Description: "paid chat completion request",
 			MimeType:    "application/json",
 		},
-		Accepts:    []x402spike.PaymentRequirements{p.chatPaywall.Requirement},
+		Accepts:    []x402spike.PaymentRequirements{requirement},
 		Extensions: map[string]any{},
 	}
 	paymentHeader := r.Header.Get("PAYMENT-SIGNATURE")
@@ -56,10 +71,13 @@ func (p *OpenAIProxy) enforceChatPayment(w http.ResponseWriter, r *http.Request)
 			"event":      "x402_payment_required",
 			"request_id": requestID,
 			"url":        reqURL,
-			"network":    p.chatPaywall.Requirement.Network,
-			"asset":      p.chatPaywall.Requirement.Asset,
-			"amount":     p.chatPaywall.Requirement.Amount,
-			"pay_to":     p.chatPaywall.Requirement.PayTo,
+			"network":    requirement.Network,
+			"asset":      requirement.Asset,
+			"amount":     requirement.Amount,
+			"pay_to":     requirement.PayTo,
+			"tokens_in":  inputTokens,
+			"tokens_out": outputTokens,
+			"tokens_est": totalTokens,
 			"reason":     "missing_payment_signature",
 			"latency_ms": time.Since(started).Milliseconds(),
 		})
@@ -81,7 +99,7 @@ func (p *OpenAIProxy) enforceChatPayment(w http.ResponseWriter, r *http.Request)
 		writePaymentRequired(w, paymentRequired, x402spike.SettlementResponse{})
 		return false
 	}
-	if err := validateAcceptedPayment(payload.Accepted, p.chatPaywall.Requirement); err != nil {
+	if err := validateAcceptedPayment(payload.Accepted, requirement); err != nil {
 		p.logRequest(map[string]any{
 			"event":      "x402_payment_rejected",
 			"request_id": requestID,
@@ -120,7 +138,7 @@ func (p *OpenAIProxy) enforceChatPayment(w http.ResponseWriter, r *http.Request)
 		return true
 	}
 
-	settle, verifyMS, settleMS, err := settleWithFacilitator(p.chatPaywall.FacilitatorURL, payload, p.chatPaywall.Requirement)
+	settle, verifyMS, settleMS, err := settleWithFacilitator(p.chatPaywall.FacilitatorURL, payload, requirement)
 	if err != nil {
 		p.logRequest(map[string]any{
 			"event":       "x402_payment_rejected",
@@ -171,6 +189,85 @@ func (p *OpenAIProxy) enforceChatPayment(w http.ResponseWriter, r *http.Request)
 		"facilitator": strings.TrimSpace(p.chatPaywall.FacilitatorURL),
 	})
 	return true
+}
+
+func (p *OpenAIProxy) computePaymentRequirement(req *openAIChatRequest) (x402spike.PaymentRequirements, int64, int64, int64) {
+	requirement := p.chatPaywall.Requirement
+	if p.chatPaywall == nil || p.chatPaywall.TokenPricing == nil {
+		return requirement, 0, 0, 0
+	}
+	pricing := p.resolveTokenPricing(req)
+	if pricing.AtomicPer1KTokens <= 0 {
+		return requirement, 0, 0, 0
+	}
+	inputTokens := estimateInputTokens(req)
+	outputTokens := pricing.DefaultOutputTokens
+	if req != nil && req.MaxTokens != nil && *req.MaxTokens > 0 {
+		outputTokens = int64(*req.MaxTokens)
+	}
+	if outputTokens < 0 {
+		outputTokens = 0
+	}
+	totalTokens := inputTokens + outputTokens
+	if totalTokens < 1 {
+		totalTokens = 1
+	}
+	amount := (totalTokens*pricing.AtomicPer1KTokens + 999) / 1000
+	if pricing.MinAmountAtomic > 0 && amount < pricing.MinAmountAtomic {
+		amount = pricing.MinAmountAtomic
+	}
+	if pricing.MaxAmountAtomic > 0 && amount > pricing.MaxAmountAtomic {
+		amount = pricing.MaxAmountAtomic
+	}
+	if amount < 1 {
+		amount = 1
+	}
+	requirement.Amount = strconv.FormatInt(amount, 10)
+	return requirement, inputTokens, outputTokens, totalTokens
+}
+
+func (p *OpenAIProxy) resolveTokenPricing(req *openAIChatRequest) X402TokenPricingConfig {
+	if p == nil || p.chatPaywall == nil || p.chatPaywall.TokenPricing == nil {
+		return X402TokenPricingConfig{}
+	}
+	pricing := *p.chatPaywall.TokenPricing
+	if req == nil {
+		return pricing
+	}
+	model := strings.TrimSpace(req.Model)
+	if model == "" || len(p.chatPaywall.ModelPricing) == 0 {
+		return pricing
+	}
+	if m, ok := p.chatPaywall.ModelPricing[model]; ok {
+		if m.AtomicPer1KTokens > 0 {
+			pricing.AtomicPer1KTokens = m.AtomicPer1KTokens
+		}
+		if m.MinAmountAtomic > 0 {
+			pricing.MinAmountAtomic = m.MinAmountAtomic
+		}
+		if m.MaxAmountAtomic > 0 {
+			pricing.MaxAmountAtomic = m.MaxAmountAtomic
+		}
+		if m.DefaultOutputTokens > 0 {
+			pricing.DefaultOutputTokens = m.DefaultOutputTokens
+		}
+	}
+	return pricing
+}
+
+func estimateInputTokens(req *openAIChatRequest) int64 {
+	if req == nil || len(req.Messages) == 0 {
+		return 0
+	}
+	var total int64
+	for _, msg := range req.Messages {
+		// Lightweight token estimate for pre-inference paywall pricing.
+		// Typical English text is close to 4 chars/token.
+		contentTokens := int64((len(msg.Content) + 3) / 4)
+		roleTokens := int64((len(msg.Role) + 3) / 4)
+		total += contentTokens + roleTokens + 4
+	}
+	return total
 }
 
 func settleWithFacilitator(

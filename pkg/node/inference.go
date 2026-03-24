@@ -66,6 +66,15 @@ func (r *Runtime) registerInferenceHandler(backend inferenceBackend) {
 		}
 		reqID = req.GetRequestId()
 		model = req.GetModel()
+		if paymentErr, ok := r.enforceInferencePayment(&req); !ok {
+			failure = "payment required"
+			_ = json.NewEncoder(s).Encode(&apiv1.InferenceResponse{
+				RequestId:    req.GetRequestId(),
+				Ok:           false,
+				ErrorMessage: paymentErr,
+			})
+			return
+		}
 		started := time.Now()
 		resp, err := inferWithBackend(context.Background(), backend, &req)
 		if err != nil {
@@ -134,6 +143,16 @@ func (r *Runtime) registerInferenceStreamHandler(backend streamInferenceBackend)
 		}
 		reqID = req.GetRequestId()
 		model = req.GetModel()
+		if paymentErr, ok := r.enforceInferencePayment(&req); !ok {
+			failure = "payment required"
+			_ = json.NewEncoder(s).Encode(&apiv1.InferenceStreamChunk{
+				RequestId:    req.GetRequestId(),
+				Done:         true,
+				Ok:           false,
+				ErrorMessage: paymentErr,
+			})
+			return
+		}
 		rc, err := inferStreamWithBackend(context.Background(), backend, &req)
 		if err != nil {
 			failure = err.Error()
@@ -291,6 +310,9 @@ func (r *Runtime) InferRemote(ctx context.Context, target peer.ID, req *apiv1.In
 	}
 	if !resp.GetOk() {
 		if msg := resp.GetErrorMessage(); msg != "" {
+			if payErr, ok := decodePaymentRequiredEnvelope(msg); ok {
+				return nil, payErr
+			}
 			return nil, fmt.Errorf("remote inference failed: %s", msg)
 		}
 		return nil, fmt.Errorf("remote inference failed")

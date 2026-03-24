@@ -674,6 +674,197 @@ func TestHandleChatCompletionsWithPaymentAndFacilitator(t *testing.T) {
 	}
 }
 
+func TestHandleChatCompletionsDynamicX402AmountByTokenEstimate(t *testing.T) {
+	t.Parallel()
+	p := NewOpenAIProxy("127.0.0.1:0", "http://127.0.0.1:1", nil)
+	p.SetX402ChatPaywall(&X402PaywallConfig{
+		FacilitatorURL: "",
+		Requirement: x402spike.PaymentRequirements{
+			Scheme:            "exact",
+			Network:           "eip155:84532",
+			Amount:            "10000",
+			Asset:             "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+			PayTo:             "0x209693Bc6afc0C5328bA36FaF03C514EF312287C",
+			MaxTimeoutSeconds: 60,
+			Extra: map[string]any{
+				"name":    "USDC",
+				"version": "2",
+			},
+		},
+		TokenPricing: &X402TokenPricingConfig{
+			AtomicPer1KTokens:   10000,
+			MinAmountAtomic:     500,
+			DefaultOutputTokens: 50,
+		},
+	})
+
+	makeReq := func(prompt string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+			"model":"llama3.2:latest",
+			"max_tokens":64,
+			"messages":[{"role":"user","content":"`+prompt+`"}]
+		}`))
+		req.Host = "127.0.0.1:8080"
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		p.handleChatCompletions(rr, req)
+		return rr
+	}
+
+	shortRR := makeReq("hi")
+	shortRes := shortRR.Result()
+	defer shortRes.Body.Close()
+	if shortRes.StatusCode != http.StatusPaymentRequired {
+		t.Fatalf("short prompt status=%d want 402", shortRes.StatusCode)
+	}
+	var shortPR x402spike.PaymentRequired
+	if err := x402spike.DecodeBase64JSON(shortRes.Header.Get("PAYMENT-REQUIRED"), &shortPR); err != nil {
+		t.Fatalf("decode short PAYMENT-REQUIRED: %v", err)
+	}
+	if len(shortPR.Accepts) == 0 {
+		t.Fatalf("short PAYMENT-REQUIRED accepts is empty")
+	}
+
+	longRR := makeReq(strings.Repeat("hello world ", 100))
+	longRes := longRR.Result()
+	defer longRes.Body.Close()
+	if longRes.StatusCode != http.StatusPaymentRequired {
+		t.Fatalf("long prompt status=%d want 402", longRes.StatusCode)
+	}
+	var longPR x402spike.PaymentRequired
+	if err := x402spike.DecodeBase64JSON(longRes.Header.Get("PAYMENT-REQUIRED"), &longPR); err != nil {
+		t.Fatalf("decode long PAYMENT-REQUIRED: %v", err)
+	}
+	if len(longPR.Accepts) == 0 {
+		t.Fatalf("long PAYMENT-REQUIRED accepts is empty")
+	}
+
+	shortAmt := shortPR.Accepts[0].Amount
+	longAmt := longPR.Accepts[0].Amount
+	if shortAmt == longAmt {
+		t.Fatalf("expected dynamic amount to change with prompt size, short=%s long=%s", shortAmt, longAmt)
+	}
+}
+
+func TestHandleChatCompletionsDynamicX402AmountRespectsPerModelMinMax(t *testing.T) {
+	t.Parallel()
+	p := NewOpenAIProxy("127.0.0.1:0", "http://127.0.0.1:1", nil)
+	p.SetX402ChatPaywall(&X402PaywallConfig{
+		FacilitatorURL: "",
+		Requirement: x402spike.PaymentRequirements{
+			Scheme:            "exact",
+			Network:           "eip155:84532",
+			Amount:            "10000",
+			Asset:             "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+			PayTo:             "0x209693Bc6afc0C5328bA36FaF03C514EF312287C",
+			MaxTimeoutSeconds: 60,
+			Extra: map[string]any{
+				"name":    "USDC",
+				"version": "2",
+			},
+		},
+		TokenPricing: &X402TokenPricingConfig{
+			AtomicPer1KTokens:   10000,
+			MinAmountAtomic:     500,
+			DefaultOutputTokens: 64,
+		},
+		ModelPricing: map[string]X402TokenPricingConfig{
+			"cheap-model": {
+				MaxAmountAtomic: 600,
+			},
+			"premium-model": {
+				MinAmountAtomic: 2500,
+			},
+		},
+	})
+
+	getAmount := func(model, prompt string) string {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+			"model":"`+model+`",
+			"messages":[{"role":"user","content":"`+prompt+`"}]
+		}`))
+		req.Host = "127.0.0.1:8080"
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		p.handleChatCompletions(rr, req)
+		res := rr.Result()
+		defer res.Body.Close()
+		if res.StatusCode != http.StatusPaymentRequired {
+			t.Fatalf("model=%s status=%d want 402", model, res.StatusCode)
+		}
+		var pr x402spike.PaymentRequired
+		if err := x402spike.DecodeBase64JSON(res.Header.Get("PAYMENT-REQUIRED"), &pr); err != nil {
+			t.Fatalf("decode PAYMENT-REQUIRED model=%s: %v", model, err)
+		}
+		if len(pr.Accepts) == 0 {
+			t.Fatalf("empty accepts for model=%s", model)
+		}
+		return pr.Accepts[0].Amount
+	}
+
+	cheapAmt := getAmount("cheap-model", strings.Repeat("hello world ", 300))
+	if cheapAmt != "600" {
+		t.Fatalf("cheap model amount=%s want 600 (max cap)", cheapAmt)
+	}
+
+	premiumAmt := getAmount("premium-model", "hi")
+	if premiumAmt != "2500" {
+		t.Fatalf("premium model amount=%s want 2500 (min floor)", premiumAmt)
+	}
+}
+
+func TestHandleChatCompletionsReturnsRemotePaymentRequired(t *testing.T) {
+	t.Parallel()
+	p := NewOpenAIProxy("127.0.0.1:0", "http://127.0.0.1:1", registry.New(time.Minute))
+	p.SetRemoteChatFunc(func(_ context.Context, _ string, _ *RemoteChatRequest) (*RemoteChatResponse, error) {
+		required := x402spike.PaymentRequired{
+			X402Version: 2,
+			Error:       "PAYMENT-SIGNATURE header is required",
+			Resource: x402spike.ResourceInfo{
+				URL:         "http://127.0.0.1:8080/v1/chat/completions",
+				Description: "paid chat completion request",
+				MimeType:    "application/json",
+			},
+			Accepts: []x402spike.PaymentRequirements{{
+				Scheme:  "exact",
+				Network: "eip155:84532",
+				Amount:  "10000",
+				Asset:   "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+				PayTo:   "0x209693Bc6afc0C5328bA36FaF03C514EF312287C",
+			}},
+		}
+		requiredHeader, _ := x402spike.EncodeBase64JSON(required)
+		return nil, &RemotePaymentRequiredError{
+			Message:               "PAYMENT-SIGNATURE header is required",
+			PaymentRequiredHeader: requiredHeader,
+		}
+	})
+	p.reg.ApplyHealthJSON([]byte(fmt.Sprintf(`{"node_id":"peer-remote","uptime_sec":1,"timestamp_ms":%d}`, time.Now().UnixMilli())))
+	p.reg.ApplyNodeAnnounceProto(&apiv1.NodeAnnounce{
+		NodeId:      "peer-remote",
+		Models:      []string{"llama3.2:latest"},
+		TimestampMs: time.Now().UnixMilli(),
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"llama3.2:latest",
+		"messages":[{"role":"user","content":"hello"}]
+	}`))
+	req.Host = "127.0.0.1:8080"
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	p.handleChatCompletions(rr, req)
+	res := rr.Result()
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusPaymentRequired {
+		t.Fatalf("status=%d want 402", res.StatusCode)
+	}
+	if got := res.Header.Get("PAYMENT-REQUIRED"); got == "" {
+		t.Fatalf("expected PAYMENT-REQUIRED header")
+	}
+}
+
 func TestHandleChatCompletionsDoesNotLogPromptOnUpstreamError(t *testing.T) {
 	t.Parallel()
 	const promptSecret = "TOP_SECRET_PROMPT_TEXT_123"
