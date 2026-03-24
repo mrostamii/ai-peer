@@ -34,17 +34,41 @@ func (r *Runtime) registerInferenceHandler(backend inferenceBackend) {
 		defer s.Close()
 		inferStarted := r.markInferenceStarted()
 		defer r.markInferenceFinished()
+		handlerStarted := time.Now()
+		remotePeer := s.Conn().RemotePeer().String()
+		reqID := ""
+		model := ""
+		tokensUsed := int64(0)
+		success := false
+		failure := ""
+		defer func() {
+			logInferenceEvent(map[string]any{
+				"event":       "inference_server_complete",
+				"stream":      false,
+				"remote_peer": remotePeer,
+				"request_id":  reqID,
+				"model":       model,
+				"tokens_used": tokensUsed,
+				"ok":          success,
+				"error":       failure,
+				"latency_ms":  time.Since(handlerStarted).Milliseconds(),
+			})
+		}()
 		var req apiv1.InferenceRequest
 		if err := json.NewDecoder(io.LimitReader(s, 4<<20)).Decode(&req); err != nil {
+			failure = "decode inference request: " + err.Error()
 			_ = json.NewEncoder(s).Encode(&apiv1.InferenceResponse{
 				Ok:           false,
 				ErrorMessage: "decode inference request: " + err.Error(),
 			})
 			return
 		}
+		reqID = req.GetRequestId()
+		model = req.GetModel()
 		started := time.Now()
 		resp, err := inferWithBackend(context.Background(), backend, &req)
 		if err != nil {
+			failure = err.Error()
 			_ = json.NewEncoder(s).Encode(&apiv1.InferenceResponse{
 				RequestId:    req.GetRequestId(),
 				Ok:           false,
@@ -55,6 +79,8 @@ func (r *Runtime) registerInferenceHandler(backend inferenceBackend) {
 		total := time.Since(inferStarted)
 		// Unary backend responses do not expose TTFT, so use total duration as a proxy.
 		r.recordInferenceSample(total, total, resp.GetTokensUsed())
+		tokensUsed = resp.GetTokensUsed()
+		success = true
 		resp.LatencyMs = time.Since(started).Milliseconds()
 		if err := json.NewEncoder(s).Encode(resp); err != nil {
 			log.Printf("inference stream encode warning: %v", err)
@@ -67,6 +93,12 @@ func (r *Runtime) registerInferenceStreamHandler(backend streamInferenceBackend)
 		defer s.Close()
 		_ = r.markInferenceStarted()
 		streamStarted := time.Now()
+		remotePeer := s.Conn().RemotePeer().String()
+		reqID := ""
+		model := ""
+		tokensUsed := int64(0)
+		success := false
+		failure := ""
 		var sampleTotal time.Duration
 		var sampleTTFT time.Duration
 		haveSample := false
@@ -75,9 +107,22 @@ func (r *Runtime) registerInferenceStreamHandler(backend streamInferenceBackend)
 				r.recordInferenceSample(sampleTotal, sampleTTFT, 0)
 			}
 			r.markInferenceFinished()
+			logInferenceEvent(map[string]any{
+				"event":       "inference_server_complete",
+				"stream":      true,
+				"remote_peer": remotePeer,
+				"request_id":  reqID,
+				"model":       model,
+				"tokens_used": tokensUsed,
+				"ok":          success,
+				"error":       failure,
+				"latency_ms":  time.Since(streamStarted).Milliseconds(),
+				"ttft_ms":     sampleTTFT.Milliseconds(),
+			})
 		}()
 		var req apiv1.InferenceRequest
 		if err := json.NewDecoder(io.LimitReader(s, 4<<20)).Decode(&req); err != nil {
+			failure = "decode inference request: " + err.Error()
 			_ = json.NewEncoder(s).Encode(&apiv1.InferenceStreamChunk{
 				RequestId:    req.GetRequestId(),
 				Done:         true,
@@ -86,8 +131,11 @@ func (r *Runtime) registerInferenceStreamHandler(backend streamInferenceBackend)
 			})
 			return
 		}
+		reqID = req.GetRequestId()
+		model = req.GetModel()
 		rc, err := inferStreamWithBackend(context.Background(), backend, &req)
 		if err != nil {
+			failure = err.Error()
 			_ = json.NewEncoder(s).Encode(&apiv1.InferenceStreamChunk{
 				RequestId:    req.GetRequestId(),
 				Done:         true,
@@ -118,6 +166,7 @@ func (r *Runtime) registerInferenceStreamHandler(backend streamInferenceBackend)
 							sampleTTFT = sampleTotal
 						}
 						haveSample = true
+						success = true
 					}
 					_ = json.NewEncoder(s).Encode(&apiv1.InferenceStreamChunk{
 						RequestId: req.GetRequestId(),
@@ -126,6 +175,7 @@ func (r *Runtime) registerInferenceStreamHandler(backend streamInferenceBackend)
 					})
 					return
 				}
+				failure = "decode backend stream: " + err.Error()
 				_ = json.NewEncoder(s).Encode(&apiv1.InferenceStreamChunk{
 					RequestId:    req.GetRequestId(),
 					Done:         true,
@@ -139,21 +189,24 @@ func (r *Runtime) registerInferenceStreamHandler(backend streamInferenceBackend)
 				sampleTTFT = time.Since(streamStarted)
 			}
 			if err := json.NewEncoder(s).Encode(&apiv1.InferenceStreamChunk{
-				RequestId: req.GetRequestId(),
-				Model:     chunk.Model,
-				Content:   chunk.Message.Content,
+				RequestId:  req.GetRequestId(),
+				Model:      chunk.Model,
+				Content:    chunk.Message.Content,
 				TokensUsed: int64(chunk.PromptEvalCount + chunk.EvalCount),
-				Done:      chunk.Done,
-				Ok:        true,
+				Done:       chunk.Done,
+				Ok:         true,
 			}); err != nil {
+				failure = "encode response chunk: " + err.Error()
 				return
 			}
 			if chunk.Done {
+				tokensUsed = int64(chunk.PromptEvalCount + chunk.EvalCount)
 				sampleTotal = time.Since(streamStarted)
 				if sampleTTFT <= 0 {
 					sampleTTFT = sampleTotal
 				}
 				haveSample = true
+				success = true
 				return
 			}
 		}
@@ -258,4 +311,13 @@ func (r *Runtime) InferRemoteStream(ctx context.Context, target peer.ID, req *ap
 	}
 	_ = s.CloseWrite()
 	return s, nil
+}
+
+func logInferenceEvent(fields map[string]any) {
+	raw, err := json.Marshal(fields)
+	if err != nil {
+		log.Printf("inference log marshal warning: %v", err)
+		return
+	}
+	log.Print(string(raw))
 }

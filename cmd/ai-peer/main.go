@@ -3,11 +3,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"slices"
@@ -23,6 +26,7 @@ import (
 	"github.com/mrostamii/ai-peer/pkg/gateway"
 	"github.com/mrostamii/ai-peer/pkg/node"
 	"github.com/mrostamii/ai-peer/pkg/registry"
+	"github.com/mrostamii/ai-peer/pkg/x402client"
 	"github.com/mrostamii/ai-peer/pkg/x402spike"
 )
 
@@ -30,6 +34,7 @@ func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("ai-peer")
 		fmt.Println("usage: ai-peer config-check -file ./node.yaml")
+		fmt.Println("usage: ai-peer pay chat -url http://127.0.0.1:8080/v1/chat/completions -model qwen2.5:3b -message \"say hi\"")
 		return
 	}
 
@@ -42,6 +47,8 @@ func main() {
 		runNetwork(os.Args[2:])
 	case "gateway":
 		runGateway(os.Args[2:])
+	case "pay":
+		runPay(os.Args[2:])
 	default:
 		fmt.Printf("unknown command: %s\n", os.Args[1])
 		os.Exit(2)
@@ -360,8 +367,12 @@ func buildRemoteChatFunc(rt *node.Runtime, cfg *config.Config) gateway.RemoteCha
 		if err != nil {
 			return nil, fmt.Errorf("decode target peer id: %w", err)
 		}
+		requestID := strings.TrimSpace(req.RequestID)
+		if requestID == "" {
+			requestID = fmt.Sprintf("req-%d", time.Now().UnixNano())
+		}
 		wireReq := &apiv1.InferenceRequest{
-			RequestId: fmt.Sprintf("req-%d", time.Now().UnixNano()),
+			RequestId: requestID,
 			Model:     req.Model,
 			Messages:  make([]*apiv1.ChatMessage, 0, len(req.Messages)),
 			Params:    map[string]string{},
@@ -436,8 +447,12 @@ func buildRemoteStreamChatFunc(rt *node.Runtime, cfg *config.Config) gateway.Rem
 		if err != nil {
 			return nil, fmt.Errorf("decode target peer id: %w", err)
 		}
+		requestID := strings.TrimSpace(req.RequestID)
+		if requestID == "" {
+			requestID = fmt.Sprintf("req-%d", time.Now().UnixNano())
+		}
 		wireReq := &apiv1.InferenceRequest{
-			RequestId: fmt.Sprintf("req-%d", time.Now().UnixNano()),
+			RequestId: requestID,
 			Model:     req.Model,
 			Messages:  make([]*apiv1.ChatMessage, 0, len(req.Messages)),
 			Params:    map[string]string{},
@@ -627,4 +642,90 @@ func runNetworkModels(args []string) {
 	for _, m := range avail {
 		fmt.Printf("- model=%s providers=%d\n", m.Model, m.ProviderCount)
 	}
+}
+
+func runPay(args []string) {
+	if len(args) == 0 {
+		fmt.Println("usage: ai-peer pay chat -url http://127.0.0.1:8080/v1/chat/completions -model qwen2.5:3b -message \"say hi\"")
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "chat":
+		runPayChat(args[1:])
+	default:
+		fmt.Printf("unknown pay command: %s\n", args[0])
+		os.Exit(2)
+	}
+}
+
+func runPayChat(args []string) {
+	fs := flag.NewFlagSet("pay chat", flag.ExitOnError)
+	url := fs.String("url", "http://127.0.0.1:8080/v1/chat/completions", "chat completions endpoint URL")
+	model := fs.String("model", "qwen2.5:3b", "model name")
+	message := fs.String("message", "say hi", "user message content")
+	stream := fs.Bool("stream", true, "request streaming response")
+	privateKey := fs.String("private-key", "", "optional private key override")
+	_ = fs.Parse(args)
+
+	client, err := x402client.NewFromEnv()
+	if err != nil {
+		log.Fatalf("wallet error: %v", err)
+	}
+	if strings.TrimSpace(*privateKey) != "" {
+		client.PrivateKey = strings.TrimSpace(*privateKey)
+	}
+
+	body := map[string]any{
+		"model":  *model,
+		"stream": *stream,
+		"messages": []map[string]string{
+			{"role": "user", "content": *message},
+		},
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		log.Fatalf("request marshal error: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, *url, bytes.NewReader(raw))
+	if err != nil {
+		log.Fatalf("request create error: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.DoWithPayment(req)
+	if err != nil {
+		log.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if settleHeader := resp.Header.Get("PAYMENT-RESPONSE"); strings.TrimSpace(settleHeader) != "" {
+		var settle x402spike.SettlementResponse
+		if err := x402spike.DecodeBase64JSON(settleHeader, &settle); err == nil {
+			settleRaw, _ := json.MarshalIndent(settle, "", "  ")
+			log.Printf("payment settlement: %s", settleRaw)
+		}
+	}
+	if reqID := strings.TrimSpace(resp.Header.Get("X-AI-Peer-Request-ID")); reqID != "" {
+		fmt.Fprintf(os.Stderr, "request_id=%s\n", reqID)
+	}
+
+	if *stream {
+		if resp.StatusCode >= 400 {
+			respBody, _ := io.ReadAll(resp.Body)
+			log.Fatalf("status=%d body=%s", resp.StatusCode, string(respBody))
+		}
+		if _, err := io.Copy(os.Stdout, resp.Body); err != nil {
+			log.Fatalf("stream copy error: %v", err)
+		}
+		return
+	}
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Fatalf("read response error: %v", err)
+	}
+	if resp.StatusCode >= 400 {
+		log.Fatalf("status=%d body=%s", resp.StatusCode, string(respBody))
+	}
+	_, _ = os.Stdout.Write(respBody)
 }

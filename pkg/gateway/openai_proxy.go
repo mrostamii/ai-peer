@@ -37,6 +37,7 @@ type RemoteChatMessage struct {
 }
 
 type RemoteChatRequest struct {
+	RequestID   string
 	Model       string
 	Messages    []RemoteChatMessage
 	Temperature *float64
@@ -208,6 +209,9 @@ func (p *OpenAIProxy) handleModels(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+	requestID := fmt.Sprintf("gw-%d", time.Now().UnixNano())
+	w.Header().Set("X-AI-Peer-Request-ID", requestID)
+	r.Header.Set("X-AI-Peer-Request-ID", requestID)
 	if !p.enforceChatPayment(w, r) {
 		return
 	}
@@ -230,7 +234,7 @@ func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if oreq.Stream {
-		p.handleChatCompletionsStream(w, r, &oreq)
+		p.handleChatCompletionsStream(w, r, &oreq, requestID)
 		return
 	}
 	started := time.Now()
@@ -241,6 +245,7 @@ func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 	defer func() {
 		p.logRequest(map[string]any{
 			"event":       "inference_request",
+			"request_id":  requestID,
 			"stream":      false,
 			"model":       oreq.Model,
 			"node_id":     selectedNode,
@@ -258,6 +263,7 @@ func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 		nodes = p.reorderNodesByPing(r.Context(), nodes)
 		if len(nodes) > 0 {
 			remoteReq := &RemoteChatRequest{
+				RequestID:   requestID,
 				Model:       oreq.Model,
 				Messages:    make([]RemoteChatMessage, 0, len(oreq.Messages)),
 				Temperature: oreq.Temperature,
@@ -280,7 +286,7 @@ func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 				}
 				tokensUsed = resp.CompletionTokens
 				success = true
-				_ = writeJSON(w, http.StatusOK, openAIChatCompletionFromRemote(resp, oreq.Model))
+				_ = writeJSON(w, http.StatusOK, openAIChatCompletionFromRemote(resp, oreq.Model, requestID))
 				return
 			}
 		}
@@ -331,10 +337,10 @@ func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 
 	tokensUsed = int64(ochat.PromptEvalCount + ochat.EvalCount)
 	success = true
-	_ = writeJSON(w, http.StatusOK, openAIChatCompletionFromOllama(&ochat, oreq.Model))
+	_ = writeJSON(w, http.StatusOK, openAIChatCompletionFromOllama(&ochat, oreq.Model, requestID))
 }
 
-func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http.Request, oreq *openAIChatRequest) {
+func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http.Request, oreq *openAIChatRequest, requestID string) {
 	started := time.Now()
 	selectedNode := ""
 	tokensUsed := int64(0)
@@ -343,6 +349,7 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 	defer func() {
 		p.logRequest(map[string]any{
 			"event":       "inference_request",
+			"request_id":  requestID,
 			"stream":      true,
 			"model":       oreq.Model,
 			"node_id":     selectedNode,
@@ -364,6 +371,7 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 			selectedNode = node.NodeID
 			attemptStarted := time.Now()
 			rc, err := p.remoteStreamChat(reqCtx, node.NodeID, &RemoteChatRequest{
+				RequestID:   requestID,
 				Model:       oreq.Model,
 				Temperature: oreq.Temperature,
 				Messages: func() []RemoteChatMessage {
@@ -420,7 +428,7 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 				finishReason = "stop"
 			}
 			firstChunk = false
-			if err := p.writeSSEChunk(w, flusher, chatID, created, model, delta, finishReason); err != nil {
+			if err := p.writeSSEChunk(w, flusher, chatID, created, model, requestID, delta, finishReason); err != nil {
 				failure = err.Error()
 				return
 			}
@@ -460,7 +468,7 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 					finishReason = "stop"
 				}
 				firstChunk = false
-				if err := p.writeSSEChunk(w, flusher, chatID, created, model, delta, finishReason); err != nil {
+				if err := p.writeSSEChunk(w, flusher, chatID, created, model, requestID, delta, finishReason); err != nil {
 					failure = err.Error()
 					return
 				}
@@ -543,7 +551,7 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 		firstFinish = "stop"
 	}
 	firstChunk = false
-	if err := p.writeSSEChunk(w, flusher, chatID, created, model, firstDelta, firstFinish); err != nil {
+	if err := p.writeSSEChunk(w, flusher, chatID, created, model, requestID, firstDelta, firstFinish); err != nil {
 		failure = err.Error()
 		return
 	}
@@ -578,7 +586,7 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 			finishReason = "stop"
 		}
 		firstChunk = false
-		if err := p.writeSSEChunk(w, flusher, chatID, created, model, delta, finishReason); err != nil {
+		if err := p.writeSSEChunk(w, flusher, chatID, created, model, requestID, delta, finishReason); err != nil {
 			failure = err.Error()
 			return
 		}
@@ -724,16 +732,17 @@ func toOllamaChatBody(req *openAIChatRequest) map[string]any {
 	return body
 }
 
-func openAIChatCompletionFromOllama(ollama *ollamaChatResponse, requestedModel string) map[string]any {
+func openAIChatCompletionFromOllama(ollama *ollamaChatResponse, requestedModel, requestID string) map[string]any {
 	model := requestedModel
 	if model == "" {
 		model = ollama.Model
 	}
 	return map[string]any{
-		"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
-		"object":  "chat.completion",
-		"created": time.Now().Unix(),
-		"model":   model,
+		"id":           fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+		"object":       "chat.completion",
+		"created":      time.Now().Unix(),
+		"model":        model,
+		"x_request_id": requestID,
 		"choices": []map[string]any{
 			{
 				"index":         0,
@@ -749,7 +758,7 @@ func openAIChatCompletionFromOllama(ollama *ollamaChatResponse, requestedModel s
 	}
 }
 
-func openAIChatCompletionFromRemote(remote *RemoteChatResponse, requestedModel string) map[string]any {
+func openAIChatCompletionFromRemote(remote *RemoteChatResponse, requestedModel, requestID string) map[string]any {
 	model := requestedModel
 	if model == "" && remote != nil {
 		model = remote.Model
@@ -761,10 +770,11 @@ func openAIChatCompletionFromRemote(remote *RemoteChatResponse, requestedModel s
 		tokens = remote.CompletionTokens
 	}
 	return map[string]any{
-		"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
-		"object":  "chat.completion",
-		"created": time.Now().Unix(),
-		"model":   model,
+		"id":           fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+		"object":       "chat.completion",
+		"created":      time.Now().Unix(),
+		"model":        model,
+		"x_request_id": requestID,
 		"choices": []map[string]any{
 			{
 				"index":         0,
@@ -809,12 +819,13 @@ func (p *OpenAIProxy) decodeWithTimeout(timeout time.Duration, decodeFn func() e
 	}
 }
 
-func (p *OpenAIProxy) writeSSEChunk(w io.Writer, flusher http.Flusher, id string, created int64, model string, delta map[string]any, finishReason any) error {
+func (p *OpenAIProxy) writeSSEChunk(w io.Writer, flusher http.Flusher, id string, created int64, model string, requestID string, delta map[string]any, finishReason any) error {
 	event := map[string]any{
-		"id":      id,
-		"object":  "chat.completion.chunk",
-		"created": created,
-		"model":   model,
+		"id":           id,
+		"object":       "chat.completion.chunk",
+		"created":      created,
+		"model":        model,
+		"x_request_id": requestID,
 		"choices": []map[string]any{
 			{
 				"index":         0,

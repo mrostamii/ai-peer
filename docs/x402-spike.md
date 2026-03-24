@@ -75,3 +75,19 @@ When enabled:
 
 - requests without `PAYMENT-SIGNATURE` get `402` + `PAYMENT-REQUIRED`
 - valid paid retries proceed to inference and receive `PAYMENT-RESPONSE`
+
+## Agent-friendly paid client
+
+Use `ai-peer pay chat` to handle x402 automatically (request -> 402 -> sign -> retry):
+
+```bash
+export EVM_PRIVATE_KEY=0xYOUR_CONSUMER_PRIVATE_KEY
+
+go run ./cmd/ai-peer pay chat \
+  -url http://127.0.0.1:8080/v1/chat/completions \
+  -model qwen2.5:3b \
+  -message "say hi" \
+  -stream true
+```
+
+This avoids manual `PAYMENT-SIGNATURE` handling and is intended as the base UX for agent integrations.

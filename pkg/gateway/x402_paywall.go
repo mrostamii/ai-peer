@@ -36,11 +36,14 @@ func (p *OpenAIProxy) enforceChatPayment(w http.ResponseWriter, r *http.Request)
 	if p.chatPaywall == nil {
 		return true
 	}
+	started := time.Now()
+	reqURL := requestURL(r)
+	requestID := strings.TrimSpace(r.Header.Get("X-AI-Peer-Request-ID"))
 	paymentRequired := x402spike.PaymentRequired{
 		X402Version: 2,
 		Error:       "PAYMENT-SIGNATURE header is required",
 		Resource: x402spike.ResourceInfo{
-			URL:         requestURL(r),
+			URL:         reqURL,
 			Description: "paid chat completion request",
 			MimeType:    "application/json",
 		},
@@ -49,17 +52,45 @@ func (p *OpenAIProxy) enforceChatPayment(w http.ResponseWriter, r *http.Request)
 	}
 	paymentHeader := r.Header.Get("PAYMENT-SIGNATURE")
 	if strings.TrimSpace(paymentHeader) == "" {
+		p.logRequest(map[string]any{
+			"event":      "x402_payment_required",
+			"request_id": requestID,
+			"url":        reqURL,
+			"network":    p.chatPaywall.Requirement.Network,
+			"asset":      p.chatPaywall.Requirement.Asset,
+			"amount":     p.chatPaywall.Requirement.Amount,
+			"pay_to":     p.chatPaywall.Requirement.PayTo,
+			"reason":     "missing_payment_signature",
+			"latency_ms": time.Since(started).Milliseconds(),
+		})
 		writePaymentRequired(w, paymentRequired, x402spike.SettlementResponse{})
 		return false
 	}
 
 	var payload x402spike.PaymentPayload
 	if err := x402spike.DecodeBase64JSON(paymentHeader, &payload); err != nil {
+		p.logRequest(map[string]any{
+			"event":      "x402_payment_rejected",
+			"request_id": requestID,
+			"url":        reqURL,
+			"reason":     "invalid_payment_signature_header",
+			"error":      err.Error(),
+			"latency_ms": time.Since(started).Milliseconds(),
+		})
 		paymentRequired.Error = "invalid PAYMENT-SIGNATURE header"
 		writePaymentRequired(w, paymentRequired, x402spike.SettlementResponse{})
 		return false
 	}
 	if err := validateAcceptedPayment(payload.Accepted, p.chatPaywall.Requirement); err != nil {
+		p.logRequest(map[string]any{
+			"event":      "x402_payment_rejected",
+			"request_id": requestID,
+			"url":        reqURL,
+			"payer":      payload.Payload.Authorization.From,
+			"reason":     "accepted_requirement_mismatch",
+			"error":      err.Error(),
+			"latency_ms": time.Since(started).Milliseconds(),
+		})
 		paymentRequired.Error = err.Error()
 		writePaymentRequired(w, paymentRequired, x402spike.SettlementResponse{})
 		return false
@@ -76,16 +107,50 @@ func (p *OpenAIProxy) enforceChatPayment(w http.ResponseWriter, r *http.Request)
 		if header, err := x402spike.EncodeBase64JSON(settle); err == nil {
 			w.Header().Set("PAYMENT-RESPONSE", header)
 		}
+		p.logRequest(map[string]any{
+			"event":      "x402_payment_accepted",
+			"request_id": requestID,
+			"url":        reqURL,
+			"payer":      settle.Payer,
+			"network":    settle.Network,
+			"tx":         settle.Transaction,
+			"mode":       "local_no_facilitator",
+			"latency_ms": time.Since(started).Milliseconds(),
+		})
 		return true
 	}
 
-	settle, err := settleWithFacilitator(p.chatPaywall.FacilitatorURL, payload, p.chatPaywall.Requirement)
+	settle, verifyMS, settleMS, err := settleWithFacilitator(p.chatPaywall.FacilitatorURL, payload, p.chatPaywall.Requirement)
 	if err != nil {
+		p.logRequest(map[string]any{
+			"event":       "x402_payment_rejected",
+			"request_id":  requestID,
+			"url":         reqURL,
+			"payer":       payload.Payload.Authorization.From,
+			"reason":      "facilitator_error",
+			"error":       err.Error(),
+			"verify_ms":   verifyMS,
+			"settle_ms":   settleMS,
+			"latency_ms":  time.Since(started).Milliseconds(),
+			"facilitator": strings.TrimSpace(p.chatPaywall.FacilitatorURL),
+		})
 		paymentRequired.Error = "facilitator error: " + err.Error()
 		writePaymentRequired(w, paymentRequired, x402spike.SettlementResponse{})
 		return false
 	}
 	if !settle.Success {
+		p.logRequest(map[string]any{
+			"event":       "x402_payment_rejected",
+			"request_id":  requestID,
+			"url":         reqURL,
+			"payer":       settle.Payer,
+			"reason":      "settlement_failed",
+			"error":       settle.ErrorReason,
+			"verify_ms":   verifyMS,
+			"settle_ms":   settleMS,
+			"latency_ms":  time.Since(started).Milliseconds(),
+			"facilitator": strings.TrimSpace(p.chatPaywall.FacilitatorURL),
+		})
 		paymentRequired.Error = "payment settlement failed"
 		writePaymentRequired(w, paymentRequired, settle)
 		return false
@@ -93,6 +158,18 @@ func (p *OpenAIProxy) enforceChatPayment(w http.ResponseWriter, r *http.Request)
 	if header, err := x402spike.EncodeBase64JSON(settle); err == nil {
 		w.Header().Set("PAYMENT-RESPONSE", header)
 	}
+	p.logRequest(map[string]any{
+		"event":       "x402_payment_accepted",
+		"request_id":  requestID,
+		"url":         reqURL,
+		"payer":       settle.Payer,
+		"network":     settle.Network,
+		"tx":          settle.Transaction,
+		"verify_ms":   verifyMS,
+		"settle_ms":   settleMS,
+		"latency_ms":  time.Since(started).Milliseconds(),
+		"facilitator": strings.TrimSpace(p.chatPaywall.FacilitatorURL),
+	})
 	return true
 }
 
@@ -100,17 +177,19 @@ func settleWithFacilitator(
 	facilitatorURL string,
 	payload x402spike.PaymentPayload,
 	req x402spike.PaymentRequirements,
-) (x402spike.SettlementResponse, error) {
+) (x402spike.SettlementResponse, int64, int64, error) {
 	facilitatorURL = strings.TrimRight(strings.TrimSpace(facilitatorURL), "/")
 	requestBody := x402VerifyRequest{
 		X402Version:         2,
 		PaymentPayload:      payload,
 		PaymentRequirements: req,
 	}
+	verifyStarted := time.Now()
 	var verifyRes x402VerifyResponse
 	if err := postJSON(facilitatorURL+"/verify", requestBody, &verifyRes); err != nil {
-		return x402spike.SettlementResponse{}, err
+		return x402spike.SettlementResponse{}, time.Since(verifyStarted).Milliseconds(), 0, err
 	}
+	verifyMS := time.Since(verifyStarted).Milliseconds()
 	if !verifyRes.IsValid {
 		return x402spike.SettlementResponse{
 			Success:     false,
@@ -118,13 +197,14 @@ func settleWithFacilitator(
 			Payer:       verifyRes.Payer,
 			Transaction: "",
 			Network:     req.Network,
-		}, nil
+		}, verifyMS, 0, nil
 	}
+	settleStarted := time.Now()
 	var settleRes x402spike.SettlementResponse
 	if err := postJSON(facilitatorURL+"/settle", requestBody, &settleRes); err != nil {
-		return x402spike.SettlementResponse{}, err
+		return x402spike.SettlementResponse{}, verifyMS, time.Since(settleStarted).Milliseconds(), err
 	}
-	return settleRes, nil
+	return settleRes, verifyMS, time.Since(settleStarted).Milliseconds(), nil
 }
 
 func postJSON(url string, reqBody any, out any) error {
