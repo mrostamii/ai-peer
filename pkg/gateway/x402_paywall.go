@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mrostamii/ai-peer/pkg/x402spike"
+	"github.com/mrostamii/tooti/pkg/x402spike"
 )
 
 type X402PaywallConfig struct {
@@ -52,7 +52,7 @@ func (p *OpenAIProxy) enforceChatPayment(w http.ResponseWriter, r *http.Request,
 	}
 	started := time.Now()
 	reqURL := requestURL(r)
-	requestID := strings.TrimSpace(r.Header.Get("X-AI-Peer-Request-ID"))
+	requestID := strings.TrimSpace(r.Header.Get("X-Tooti-Request-ID"))
 	requirement, inputTokens, outputTokens, totalTokens := p.computePaymentRequirement(oreq)
 	paymentRequired := x402spike.PaymentRequired{
 		X402Version: 2,

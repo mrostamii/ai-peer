@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mrostamii/ai-peer/pkg/apiv1"
-	"github.com/mrostamii/ai-peer/pkg/registry"
-	"github.com/mrostamii/ai-peer/pkg/x402spike"
+	"github.com/mrostamii/tooti/pkg/apiv1"
+	"github.com/mrostamii/tooti/pkg/registry"
+	"github.com/mrostamii/tooti/pkg/x402spike"
 )
 
 func TestHandleChatCompletionsStream(t *testing.T) {

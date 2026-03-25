@@ -1,4 +1,4 @@
-# ai-peer
+# tooti
 
 **Decentralized AI inference protocol**; coordination, routing, and (later) economics over libp2p, with an OpenAI-compatible gateway.
 
@@ -45,16 +45,16 @@ The project now provides a working decentralized Ollama network over libp2p with
 ### Quick run
 
 ```bash
-go build -o ai-peer ./cmd/ai-peer
+go build -o tooti ./cmd/tooti
 
 # Validate config first
-./ai-peer config-check -file ./node.yaml
+./tooti config-check -file ./node.yaml
 
 # Start node
-./ai-peer node start -file ./node.yaml
+./tooti node start -file ./node.yaml
 
 # Start gateway (same or another host)
-./ai-peer gateway start -file ./node.yaml
+./tooti gateway start -file ./node.yaml
 ```
 
 Then call the OpenAI-compatible API:
@@ -76,7 +76,7 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
 ## Repository layout
 
 ```
-cmd/ai-peer/          # main binary entrypoint
+cmd/tooti/          # main binary entrypoint
 proto/                # coordination .proto (v0.1)
 pkg/apiv1/            # generated protobuf Go types
 pkg/registry/         # in-memory node registry (gateway / routing)

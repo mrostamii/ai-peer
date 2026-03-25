@@ -7,7 +7,7 @@ import (
 
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 
-	"github.com/mrostamii/ai-peer/pkg/config"
+	"github.com/mrostamii/tooti/pkg/config"
 )
 
 // StartObserving starts libp2p + DHT like the full node, but does not advertise

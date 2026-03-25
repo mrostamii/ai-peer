@@ -10,7 +10,7 @@ import (
 )
 
 // HealthTopicID is the gossipsub topic for JSON health heartbeats (v0.1).
-const HealthTopicID = "/ai-peer/v0.1/health"
+const HealthTopicID = "/tooti/v0.1/health"
 
 type HealthUpdate struct {
 	NodeID       string                      `json:"node_id"`

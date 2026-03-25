@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mrostamii/ai-peer/pkg/apiv1"
+	"github.com/mrostamii/tooti/pkg/apiv1"
 )
 
 func TestRegistryHealthAndPrune(t *testing.T) {
