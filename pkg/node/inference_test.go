@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mrostamii/ai-peer/pkg/apiv1"
-	"github.com/mrostamii/ai-peer/pkg/backend/ollama"
+	"github.com/mrostamii/tooti/pkg/apiv1"
+	"github.com/mrostamii/tooti/pkg/backend/ollama"
 )
 
 type fakeInferenceBackend struct {

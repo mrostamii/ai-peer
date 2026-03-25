@@ -1,6 +1,6 @@
 # OpenClaw Integration
 
-This guide wires `ai-peer` into OpenClaw as a custom OpenAI-compatible provider.
+This guide wires `tooti` into OpenClaw as a custom OpenAI-compatible provider.
 
 ## Current maturity
 
@@ -9,22 +9,22 @@ This guide wires `ai-peer` into OpenClaw as a custom OpenAI-compatible provider.
 
 ## What this gives you
 
-- OpenClaw can call `ai-peer` using OpenAI-compatible chat completions.
-- Model listing comes from `ai-peer` gateway (`GET /v1/models`).
+- OpenClaw can call `tooti` using OpenAI-compatible chat completions.
+- Model listing comes from `tooti` gateway (`GET /v1/models`).
 - Streaming works through the same `POST /v1/chat/completions` path.
 
-## 1) Start ai-peer gateway
+## 1) Start tooti gateway
 
 Use a local or remote-only gateway. Example:
 
 ```bash
-./build/ai-peer gateway start -file ./node.yaml
+./build/tooti gateway start -file ./node.yaml
 ```
 
 Default mode is remote-only routing. If you intentionally want local fallback:
 
 ```bash
-./build/ai-peer gateway start -file ./node.yaml -local-backend
+./build/tooti gateway start -file ./node.yaml -local-backend
 ```
 
 ## 2) Verify gateway before OpenClaw
@@ -41,17 +41,17 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
   -d '{"model":"qwen2.5:3b","stream":true,"messages":[{"role":"user","content":"say hi"}]}'
 ```
 
-If your providers require x402 payments, use `ai-peer pay chat` for validation:
+If your providers require x402 payments, use `tooti pay chat` for validation:
 
 ```bash
-./build/ai-peer pay chat \
+./build/tooti pay chat \
   -url http://127.0.0.1:8080/v1/chat/completions \
   -model qwen2.5:3b \
   -message "say hi" \
   -stream true
 ```
 
-## 3) Add ai-peer as a provider in OpenClaw
+## 3) Add tooti as a provider in OpenClaw
 
 Use the example in `docs/openclaw.json.example` and copy the provider block
 into your OpenClaw config.
@@ -69,7 +69,7 @@ Examples:
 
 After OpenClaw starts:
 
-- list models and confirm ai-peer models appear
+- list models and confirm tooti models appear
 - run one non-stream chat
 - run one stream chat
 - verify gateway logs show remote `node_id` (not `local`) when using remote-only mode

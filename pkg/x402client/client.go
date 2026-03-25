@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mrostamii/ai-peer/pkg/x402spike"
+	"github.com/mrostamii/tooti/pkg/x402spike"
 )
 
 type Client struct {

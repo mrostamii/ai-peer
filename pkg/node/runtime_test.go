@@ -3,7 +3,7 @@ package node
 import (
 	"testing"
 
-	"github.com/mrostamii/ai-peer/pkg/config"
+	"github.com/mrostamii/tooti/pkg/config"
 )
 
 func TestParseBootstrapPeers(t *testing.T) {

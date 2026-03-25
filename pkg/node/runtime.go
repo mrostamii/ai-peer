@@ -21,8 +21,8 @@ import (
 	noise "github.com/libp2p/go-libp2p/p2p/security/noise"
 	ma "github.com/multiformats/go-multiaddr"
 
-	"github.com/mrostamii/ai-peer/pkg/backend/ollama"
-	"github.com/mrostamii/ai-peer/pkg/config"
+	"github.com/mrostamii/tooti/pkg/backend/ollama"
+	"github.com/mrostamii/tooti/pkg/config"
 )
 
 const bootstrapReconnectEvery = 30 * time.Second

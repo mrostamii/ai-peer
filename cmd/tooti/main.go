@@ -1,4 +1,4 @@
-// Package main is the root command entrypoint for the ai-peer node and tooling.
+// Package main is the root command entrypoint for the tooti node and tooling.
 // Binaries and subcommands will be expanded in later phases.
 package main
 
@@ -21,21 +21,21 @@ import (
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
-	"github.com/mrostamii/ai-peer/pkg/apiv1"
-	"github.com/mrostamii/ai-peer/pkg/backend/ollama"
-	"github.com/mrostamii/ai-peer/pkg/config"
-	"github.com/mrostamii/ai-peer/pkg/gateway"
-	"github.com/mrostamii/ai-peer/pkg/node"
-	"github.com/mrostamii/ai-peer/pkg/registry"
-	"github.com/mrostamii/ai-peer/pkg/x402client"
-	"github.com/mrostamii/ai-peer/pkg/x402spike"
+	"github.com/mrostamii/tooti/pkg/apiv1"
+	"github.com/mrostamii/tooti/pkg/backend/ollama"
+	"github.com/mrostamii/tooti/pkg/config"
+	"github.com/mrostamii/tooti/pkg/gateway"
+	"github.com/mrostamii/tooti/pkg/node"
+	"github.com/mrostamii/tooti/pkg/registry"
+	"github.com/mrostamii/tooti/pkg/x402client"
+	"github.com/mrostamii/tooti/pkg/x402spike"
 )
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("ai-peer")
-		fmt.Println("usage: ai-peer config-check -file ./node.yaml")
-		fmt.Println("usage: ai-peer pay chat -url http://127.0.0.1:8080/v1/chat/completions -model qwen2.5:3b -message \"say hi\"")
+		fmt.Println("tooti")
+		fmt.Println("usage: tooti config-check -file ./node.yaml")
+		fmt.Println("usage: tooti pay chat -url http://127.0.0.1:8080/v1/chat/completions -model qwen2.5:3b -message \"say hi\"")
 		return
 	}
 
@@ -79,7 +79,7 @@ func runConfigCheck(args []string) {
 
 func runNode(args []string) {
 	if len(args) == 0 {
-		fmt.Println("usage: ai-peer node <start|status> -file ./node.yaml")
+		fmt.Println("usage: tooti node <start|status> -file ./node.yaml")
 		os.Exit(2)
 	}
 	switch args[0] {
@@ -183,7 +183,7 @@ func runNodeStatus(args []string) {
 
 func runGateway(args []string) {
 	if len(args) == 0 {
-		fmt.Println("usage: ai-peer gateway start [-file ./node.yaml] [-listen 127.0.0.1:8080] [-ollama http://127.0.0.1:11434]")
+		fmt.Println("usage: tooti gateway start [-file ./node.yaml] [-listen 127.0.0.1:8080] [-ollama http://127.0.0.1:11434]")
 		os.Exit(2)
 	}
 	switch args[0] {
@@ -629,7 +629,7 @@ func buildKnownNodeModelMap(avail []node.ModelAvailability, known map[string]str
 
 func runNetwork(args []string) {
 	if len(args) == 0 {
-		fmt.Println("usage: ai-peer network <peers|models> -file ./node.yaml")
+		fmt.Println("usage: tooti network <peers|models> -file ./node.yaml")
 		os.Exit(2)
 	}
 	switch args[0] {
@@ -734,7 +734,7 @@ func runNetworkModels(args []string) {
 
 func runPay(args []string) {
 	if len(args) == 0 {
-		fmt.Println("usage: ai-peer pay chat -url http://127.0.0.1:8080/v1/chat/completions -model qwen2.5:3b -message \"say hi\"")
+		fmt.Println("usage: tooti pay chat -url http://127.0.0.1:8080/v1/chat/completions -model qwen2.5:3b -message \"say hi\"")
 		os.Exit(2)
 	}
 	switch args[0] {
@@ -798,7 +798,7 @@ func runPayChat(args []string) {
 			log.Printf("payment settlement: %s", settleRaw)
 		}
 	}
-	if reqID := strings.TrimSpace(resp.Header.Get("X-AI-Peer-Request-ID")); reqID != "" {
+	if reqID := strings.TrimSpace(resp.Header.Get("X-Tooti-Request-ID")); reqID != "" {
 		fmt.Fprintf(os.Stderr, "request_id=%s\n", reqID)
 	}
 

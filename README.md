@@ -1,95 +1,100 @@
-# ai-peer
+# tooti 🦜
 
-**Decentralized AI inference protocol**; coordination, routing, and (later) economics over libp2p, with an OpenAI-compatible gateway.
+[![CI](https://img.shields.io/badge/CI-not%20configured-lightgrey)](#)
+[![Go Version](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go)](go.mod)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Discord](https://img.shields.io/badge/Discord-Join%20chat-5865F2?logo=discord&logoColor=white)](https://discord.com/invite/qXXkfu3N)
 
-## Solution
+![tooti banner](assets/banner.jpg)
 
-We build the **protocol layer**, not the inference engine. Operators plug in Ollama, vLLM, llama.cpp, or other backends. This project focuses on:
+**A decentralized AI inference protocol with an OpenAI-compatible gateway.**
 
-1. **Discovery**: who is online, which models they serve, hardware signals
-2. **Routing**: latency- and cost-aware request routing across heterogeneous nodes
-3. **Trust**: reputation, staking, proof-of-inference
-4. **Payments**: USDC settlement on Base, x402-style flows where appropriate
-5. **API gateway**: single OpenAI-compatible surface for clients
+tooti connects model providers and application developers through a shared protocol layer:
+- operators run nodes and advertise available models
+- the network discovers healthy providers
+- the gateway routes requests to the best available node
+- clients use a familiar OpenAI-style API
 
-### In scope vs out of scope
+## Why tooti
 
+AI apps need reliable inference, but today teams often face:
+- single-provider dependency
+- regional outages and latency spikes
+- limited control over routing and cost
+- difficult migration paths between model backends
 
-| We build                                    | We do not build                     |
-| ------------------------------------------- | ----------------------------------- |
-| libp2p coordination, health, capability ads | CUDA / tensor kernels               |
-| Smart router (latency / cost / reputation)  | Model training or fine-tuning       |
-| Node agent (Go binary wrapping backends)    | Inference engine internals          |
-| OpenAI-compatible gateway                   | Our own token (USDC-only direction) |
+tooti exists to make inference **portable, resilient, and open**:
+- portable for developers (standard API, minimal lock-in)
+- resilient for production (multi-node discovery and failover)
+- open for operators (bring your own backend: Ollama, vLLM, llama.cpp, and more)
 
+## Architecture
 
-### Audiences
-
-- **Node operators:** install one binary, point at a local inference backend, earn USDC per request (once payments land).  
-- **Developers:** OpenAI-compatible HTTP API; routing and settlement stay behind the scenes.
-
-Detailed tasks and launch checklist are tracked in the execution plan.
-
-## Current status (v0.1)
-
-The project now provides a working decentralized Ollama network over libp2p with:
-
-- node agent with config-driven model advertisement
-- OpenAI-compatible gateway (`/v1/models`, `/v1/chat/completions`, streaming)
-- multi-node discovery and model-aware routing
-- retry logic on node failure
-- heartbeat-based network registry
-- basic CLI operations (`node`, `network`, `gateway`)
-- OpenClaw integration guide (`docs/openclaw.md`, current maturity noted inside)
-
-### Quick run
-
-```bash
-go build -o ai-peer ./cmd/ai-peer
-
-# Validate config first
-./ai-peer config-check -file ./node.yaml
-
-# Start node
-./ai-peer node start -file ./node.yaml
-
-# Start gateway (same or another host)
-./ai-peer gateway start -file ./node.yaml
+```mermaid
+flowchart LR
+    A[AI App / Client] -->|OpenAI-compatible HTTP| B[Tooti Gateway]
+    B --> C[Router]
+    C --> D[(Node Registry)]
+    D --> E[Node Agent A]
+    D --> F[Node Agent B]
+    D --> G[Node Agent C]
+    E --> H[Ollama / vLLM / llama.cpp]
+    F --> I[Ollama / vLLM / llama.cpp]
+    G --> J[Ollama / vLLM / llama.cpp]
+    E <-. libp2p heartbeat + capabilities .-> D
+    F <-. libp2p heartbeat + capabilities .-> D
+    G <-. libp2p heartbeat + capabilities .-> D
 ```
 
-Then call the OpenAI-compatible API:
+### What each part does
+
+- **Node Agent**: advertises model capabilities, health, and availability over libp2p
+- **Registry + Router**: tracks live nodes and selects where each request should go
+- **Gateway**: exposes `/v1/models` and `/v1/chat/completions` for client apps
+
+## Quick start
+
+### 1) Build
 
 ```bash
+go build -o tooti ./cmd/tooti
+```
+
+### 2) Validate and run
+
+```bash
+# Validate config first
+./tooti config-check -file ./node.yaml
+
+# Start node
+./tooti node start -file ./node.yaml
+
+# Start gateway (same host or another host)
+./tooti gateway start -file ./node.yaml
+```
+
+### 3) Test the API
+
+```bash
+# List models
 curl -s http://127.0.0.1:8080/v1/models
+
+# Stream chat completion
 curl -N http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"llama3.2:latest","stream":true,"messages":[{"role":"user","content":"say hi"}]}'
 ```
 
-**Go modules:** this repo includes a `replace` for `github.com/libp2p/go-libp2p/core` so imports resolve unambiguously to `github.com/libp2p/go-libp2p` v0.48.0 (see `go.mod`).
-
 ## OpenClaw integration
 
 - Guide: `docs/openclaw.md`
-- Example provider config: `docs/openclaw.json.example`
+- Example config: `docs/openclaw.json.example`
 
-## Repository layout
 
-```
-cmd/ai-peer/          # main binary entrypoint
-proto/                # coordination .proto (v0.1)
-pkg/apiv1/            # generated protobuf Go types
-pkg/registry/         # in-memory node registry (gateway / routing)
-pkg/                  # shared libraries
-contracts/            # Solidity / deployment artifacts (Phase 2+)
-docs/                 # additional documentation
-deploy/               # deployment configs
-```
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
 MIT
-
-## Contributing
-
-[CONTRIBUTING.md](CONTRIBUTING.md).

@@ -1,4 +1,4 @@
-module github.com/mrostamii/ai-peer
+module github.com/mrostamii/tooti
 
 go 1.26
 

@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mrostamii/ai-peer/pkg/apiv1"
-	"github.com/mrostamii/ai-peer/pkg/registry"
-	"github.com/mrostamii/ai-peer/pkg/x402spike"
+	"github.com/mrostamii/tooti/pkg/apiv1"
+	"github.com/mrostamii/tooti/pkg/registry"
+	"github.com/mrostamii/tooti/pkg/x402spike"
 )
 
 type OpenAIProxy struct {
@@ -238,8 +238,8 @@ func (p *OpenAIProxy) handleModels(w http.ResponseWriter, r *http.Request) {
 
 func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	requestID := fmt.Sprintf("gw-%d", time.Now().UnixNano())
-	w.Header().Set("X-AI-Peer-Request-ID", requestID)
-	r.Header.Set("X-AI-Peer-Request-ID", requestID)
+	w.Header().Set("X-Tooti-Request-ID", requestID)
+	r.Header.Set("X-Tooti-Request-ID", requestID)
 	if ct := r.Header.Get("Content-Type"); !strings.Contains(strings.ToLower(ct), "application/json") {
 		_ = writeJSON(w, http.StatusUnsupportedMediaType, openAIError(http.StatusUnsupportedMediaType, "expected application/json body"))
 		return

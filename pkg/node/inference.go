@@ -15,13 +15,13 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
 
-	"github.com/mrostamii/ai-peer/pkg/apiv1"
-	"github.com/mrostamii/ai-peer/pkg/backend/ollama"
-	"github.com/mrostamii/ai-peer/pkg/x402spike"
+	"github.com/mrostamii/tooti/pkg/apiv1"
+	"github.com/mrostamii/tooti/pkg/backend/ollama"
+	"github.com/mrostamii/tooti/pkg/x402spike"
 )
 
-const InferenceProtocolID = protocol.ID("/ai-peer/v0.1/inference/1.0.0")
-const InferenceStreamProtocolID = protocol.ID("/ai-peer/v0.1/inference-stream/1.0.0")
+const InferenceProtocolID = protocol.ID("/tooti/v0.1/inference/1.0.0")
+const InferenceStreamProtocolID = protocol.ID("/tooti/v0.1/inference-stream/1.0.0")
 
 type inferenceBackend interface {
 	ChatCompletion(context.Context, *ollama.ChatCompletionRequest) (*ollama.ChatCompletionResponse, error)

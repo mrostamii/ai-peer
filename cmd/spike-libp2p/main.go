@@ -28,8 +28,8 @@ import (
 )
 
 const (
-	echoProto   = protocol.ID("/ai-peer/spike-echo/1.0.0")
-	rendezvous  = "ai-peer-phase0-dht-rendezvous-v1"
+	echoProto   = protocol.ID("/tooti/spike-echo/1.0.0")
+	rendezvous  = "tooti-phase0-dht-rendezvous-v1"
 	dialTimeout = 3 * time.Minute
 	// Bootstrap returns before the routing table is usually populated; Provide/FindProviders need ≥1 peer.
 	dhtWarmupTimeout = 2 * time.Minute
@@ -320,7 +320,7 @@ func main() {
 		listen     = flag.Bool("listen", false, "server: DHT provide + echo handler until interrupted")
 		bootstrap  multiaddrList
 		peerAddr   = flag.String("peer", "", "client: optional full /ip4/.../p2p/<id> (skips DHT discovery)")
-		msg        = flag.String("msg", "hello from ai-peer spike", "client: one-line payload")
+		msg        = flag.String("msg", "hello from tooti spike", "client: one-line payload")
 		tcpPort    = flag.Int("tcp-port", 0, "local TCP listen port (0 = random)")
 		quicPort   = flag.Int("quic-port", 0, "local QUIC UDP listen port (0 = random)")
 	)

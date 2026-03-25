@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/libp2p/go-libp2p/core/peer"
-	"github.com/mrostamii/ai-peer/pkg/node"
+	"github.com/mrostamii/tooti/pkg/node"
 )
 
 func TestBuildKnownNodeModelMap(t *testing.T) {

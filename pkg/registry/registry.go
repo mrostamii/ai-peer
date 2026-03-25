@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mrostamii/ai-peer/pkg/apiv1"
+	"github.com/mrostamii/tooti/pkg/apiv1"
 )
 
 // DefaultMissedHeartbeatLimit evicts a node after this many expected heartbeat
@@ -127,7 +127,7 @@ func (r *Registry) ApplyHealthProto(msg *apiv1.HealthUpdate) error {
 	return nil
 }
 
-// ApplyHealthJSON parses the v0.1 gossipsub JSON heartbeat (/ai-peer/v0.1/health).
+// ApplyHealthJSON parses the v0.1 gossipsub JSON heartbeat (/tooti/v0.1/health).
 func (r *Registry) ApplyHealthJSON(payload []byte) error {
 	var hj healthJSON
 	if err := json.Unmarshal(payload, &hj); err != nil {

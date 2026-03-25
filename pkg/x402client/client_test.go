@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mrostamii/ai-peer/pkg/x402spike"
+	"github.com/mrostamii/tooti/pkg/x402spike"
 )
 
 func TestDoWithPaymentRetriesAfter402(t *testing.T) {

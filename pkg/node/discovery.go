@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	modelKeyPrefix      = "ai-peer/v0.1/model/"
-	capabilityKeyPrefix = "ai-peer/v0.1/capability/"
+	modelKeyPrefix      = "tooti/v0.1/model/"
+	capabilityKeyPrefix = "tooti/v0.1/capability/"
 	startupAdvertiseAttempts = 6
 	startupAdvertiseDelay    = 5 * time.Second
 )

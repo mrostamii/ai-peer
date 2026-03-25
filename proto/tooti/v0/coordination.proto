@@ -1,8 +1,8 @@
 syntax = "proto3";
 
-package ai_peer.v0.coordination;
+package tooti.v0.coordination;
 
-option go_package = "github.com/mrostamii/ai-peer/pkg/apiv1;apiv1";
+option go_package = "github.com/mrostamii/tooti/pkg/apiv1;apiv1";
 
 // NodeAnnounce is published periodically (e.g. gossipsub or capability sync) so
 // gateways can build a local registry without hitting the DHT on every request.

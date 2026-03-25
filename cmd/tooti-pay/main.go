@@ -10,8 +10,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/mrostamii/ai-peer/pkg/x402client"
-	"github.com/mrostamii/ai-peer/pkg/x402spike"
+	"github.com/mrostamii/tooti/pkg/x402client"
+	"github.com/mrostamii/tooti/pkg/x402spike"
 )
 
 func main() {
@@ -29,8 +29,8 @@ func main() {
 }
 
 func usage() {
-	fmt.Println("ai-peer-pay usage:")
-	fmt.Println("  ai-peer-pay chat -url http://127.0.0.1:8080/v1/chat/completions -model qwen2.5:3b -message \"say hi\"")
+	fmt.Println("tooti-pay usage:")
+	fmt.Println("  tooti-pay chat -url http://127.0.0.1:8080/v1/chat/completions -model qwen2.5:3b -message \"say hi\"")
 	fmt.Println("env:")
 	fmt.Println("  EVM_PRIVATE_KEY=0x... (required unless -private-key is set)")
 }
@@ -87,7 +87,7 @@ func runChat(args []string) {
 			fmt.Fprintf(os.Stderr, "payment settlement: %s\n", settleRaw)
 		}
 	}
-	if reqID := strings.TrimSpace(resp.Header.Get("X-AI-Peer-Request-ID")); reqID != "" {
+	if reqID := strings.TrimSpace(resp.Header.Get("X-Tooti-Request-ID")); reqID != "" {
 		fmt.Fprintf(os.Stderr, "request_id=%s\n", reqID)
 	}
 

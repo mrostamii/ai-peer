@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mrostamii/ai-peer/pkg/apiv1"
-	"github.com/mrostamii/ai-peer/pkg/config"
-	"github.com/mrostamii/ai-peer/pkg/x402spike"
+	"github.com/mrostamii/tooti/pkg/apiv1"
+	"github.com/mrostamii/tooti/pkg/config"
+	"github.com/mrostamii/tooti/pkg/x402spike"
 )
 
 const (
@@ -142,7 +142,7 @@ func (r *Runtime) enforceInferencePayment(req *apiv1.InferenceRequest) (*inferen
 		return nil, "", true
 	}
 	paywall := r.inferencePaywall
-	resourceURL := "http://ai-peer.local/v1/chat/completions"
+	resourceURL := "http://tooti.local/v1/chat/completions"
 	if req != nil && req.GetParams() != nil {
 		if got := strings.TrimSpace(req.GetParams()[inferenceParamResourceURL]); got != "" {
 			resourceURL = got

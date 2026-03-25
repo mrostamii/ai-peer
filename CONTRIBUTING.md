@@ -1,4 +1,4 @@
-# Contributing to ai-peer
+# Contributing to tooti
 
 Thank you for your interest.
 
