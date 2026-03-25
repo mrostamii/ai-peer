@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package tooti.v0.coordination;
+
+option go_package = "github.com/mrostamii/tooti/pkg/apiv1;apiv1";
+
+// NodeAnnounce is published periodically (e.g. gossipsub or capability sync) so
+// gateways can build a local registry without hitting the DHT on every request.
+message NodeAnnounce {
+  string node_id = 1;
+  repeated string models = 2;
+  string hardware_summary = 3;
+  string location_hint = 4;
+  string pricing_hint = 5;
+  int64 timestamp_ms = 6;
+}
+
+// HealthUpdate is a lightweight liveness signal (uptime, load, optional RTT).
+message HealthUpdate {
+  string node_id = 1;
+  int64 uptime_sec = 2;
+  double load = 3;
+  int64 latency_ms = 4;
+  int64 timestamp_ms = 5;
+}
+
+message ChatMessage {
+  string role = 1;
+  string content = 2;
+}
+
+// InferenceRequest is the libp2p wire shape for routing chat-style inference
+// (OpenAI messages mapped to repeated ChatMessage).
+message InferenceRequest {
+  string request_id = 1;
+  string model = 2;
+  repeated ChatMessage messages = 3;
+  map<string, string> params = 4;
+}
+
+message InferenceResponse {
+  string request_id = 1;
+  string content = 2;
+  int64 tokens_used = 3;
+  int64 latency_ms = 4;
+  bool ok = 5;
+  string error_message = 6;
+}
