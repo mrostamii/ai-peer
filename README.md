@@ -1,4 +1,6 @@
-# tooti
+# tooti 🦜
+
+![tooti banner](assets/banner.jpg)
 
 **Decentralized AI inference protocol**; coordination, routing, and (later) economics over libp2p, with an OpenAI-compatible gateway.
 
