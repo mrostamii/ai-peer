@@ -24,6 +24,7 @@ import (
 	"github.com/mrostamii/tooti/pkg/apiv1"
 	"github.com/mrostamii/tooti/pkg/backend/ollama"
 	"github.com/mrostamii/tooti/pkg/config"
+	"github.com/mrostamii/tooti/pkg/dataplane"
 	"github.com/mrostamii/tooti/pkg/gateway"
 	"github.com/mrostamii/tooti/pkg/node"
 	"github.com/mrostamii/tooti/pkg/registry"
@@ -319,6 +320,29 @@ func runGatewayStart(args []string) {
 	log.Printf("gateway start: listen=%s ollama=%s p2p=tcp/%d quic/%d (health topic %q)",
 		resolvedListen, resolvedOllama, cfg.Listen.TCPPort, cfg.Listen.QUICPort, node.HealthTopicID)
 	proxy := gateway.NewOpenAIProxy(resolvedListen, resolvedOllama, reg)
+	proxy.SetGatewayMode(cfg.Gateway.Mode)
+	proxy.SetControlAPIToken(cfg.Gateway.ControlAPIToken)
+	proxy.SetAuthMode(cfg.Gateway.AuthMode)
+	if strings.EqualFold(strings.TrimSpace(cfg.Gateway.Mode), "official") {
+		store, err := dataplane.OpenPostgresStore(
+			cfg.Gateway.Postgres.DSN,
+			cfg.Gateway.Postgres.MaxOpenConns,
+			cfg.Gateway.Postgres.MaxIdleConns,
+			cfg.Gateway.Postgres.ConnMaxLifetimeSec,
+		)
+		if err != nil {
+			log.Fatalf("official gateway postgres init failed: %v", err)
+		}
+		defer func() {
+			if err := store.Close(); err != nil {
+				log.Printf("postgres close warning: %v", err)
+			}
+		}()
+		proxy.SetControlStore(store)
+		log.Printf("official gateway control store enabled (postgres)")
+	} else {
+		log.Printf("community gateway mode (control store disabled)")
+	}
 	proxy.SetLocalBackendEnabled(*localBackend)
 	proxy.SetTimeouts(
 		time.Duration(cfg.Timeouts.FirstTokenSec)*time.Second,

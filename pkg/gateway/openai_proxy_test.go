@@ -111,6 +111,151 @@ func TestHandleChatCompletionsStreamLogsTokensUsed(t *testing.T) {
 	}
 }
 
+func TestEnforceAPIKeyAuthRequiredRejectsMissingKey(t *testing.T) {
+	t.Parallel()
+	p := NewOpenAIProxy("127.0.0.1:0", "http://unused", nil)
+	p.SetAuthMode("required")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	rr := httptest.NewRecorder()
+	_, ok := p.enforceAPIKeyAuth(rr, req)
+	if ok {
+		t.Fatal("expected auth failure when key is missing")
+	}
+	if rr.Result().StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status=%d want %d", rr.Result().StatusCode, http.StatusUnauthorized)
+	}
+}
+
+func TestEnforceAPIKeyAuthOptionalAllowsMissingKey(t *testing.T) {
+	t.Parallel()
+	p := NewOpenAIProxy("127.0.0.1:0", "http://unused", nil)
+	store := &mockControlStore{}
+	p.SetControlStore(store)
+	p.SetAuthMode("optional")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	rr := httptest.NewRecorder()
+	_, ok := p.enforceAPIKeyAuth(rr, req)
+	if !ok {
+		t.Fatal("expected optional mode to allow missing key")
+	}
+	if store.lookupAPIKeyCalled {
+		t.Fatal("did not expect api key lookup without provided key")
+	}
+}
+
+func TestEnforceAPIKeyAuthRequiredAcceptsValidKey(t *testing.T) {
+	t.Parallel()
+	p := NewOpenAIProxy("127.0.0.1:0", "http://unused", nil)
+	store := &mockControlStore{
+		lookupAPIKeyResult: &APIKeyPrincipal{
+			ConsumerID:   "consumer-1",
+			ConsumerType: "prepaid",
+		},
+	}
+	p.SetControlStore(store)
+	p.SetAuthMode("required")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Bearer toot_api_test")
+	rr := httptest.NewRecorder()
+	principal, ok := p.enforceAPIKeyAuth(rr, req)
+	if !ok {
+		t.Fatal("expected auth success for valid key")
+	}
+	if principal == nil || principal.ConsumerID != "consumer-1" {
+		t.Fatalf("unexpected principal: %+v", principal)
+	}
+	if !store.lookupAPIKeyCalled {
+		t.Fatal("expected api key lookup to be called")
+	}
+}
+
+func TestHandleChatCompletionsPrepaidRejectsInsufficientBalance(t *testing.T) {
+	t.Parallel()
+	p := NewOpenAIProxy("127.0.0.1:0", "http://unused", nil)
+	store := &mockControlStore{
+		lookupAPIKeyResult: &APIKeyPrincipal{
+			ConsumerID:   "consumer-prepaid",
+			ConsumerType: "prepaid",
+		},
+		reservePrepaidResult: PrepaidReserveResult{
+			Approved:     false,
+			ReservedUSDC: 0.001,
+			BalanceAfter: 0,
+		},
+	}
+	p.SetControlStore(store)
+	p.SetAuthMode("required")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"llama3.2:latest",
+		"messages":[{"role":"user","content":"hello"}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer toot_api_test")
+	rr := httptest.NewRecorder()
+	p.handleChatCompletions(rr, req)
+
+	if rr.Result().StatusCode != http.StatusPaymentRequired {
+		t.Fatalf("status=%d want %d", rr.Result().StatusCode, http.StatusPaymentRequired)
+	}
+	if !store.reservePrepaidCalled {
+		t.Fatal("expected reserve prepaid to be called")
+	}
+}
+
+func TestHandleChatCompletionsPrepaidFinalizesReservation(t *testing.T) {
+	t.Parallel()
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/chat" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{
+			"model":"llama3.2:latest",
+			"message":{"role":"assistant","content":"hi"},
+			"prompt_eval_count":5,
+			"eval_count":3
+		}`))
+	}))
+	defer ollama.Close()
+
+	p := NewOpenAIProxy("127.0.0.1:0", ollama.URL, nil)
+	store := &mockControlStore{
+		lookupAPIKeyResult: &APIKeyPrincipal{
+			ConsumerID:   "consumer-prepaid",
+			ConsumerType: "prepaid",
+		},
+		reservePrepaidResult: PrepaidReserveResult{
+			Approved:     true,
+			ReservedUSDC: 0.01,
+			BalanceAfter: 1.0,
+		},
+	}
+	p.SetControlStore(store)
+	p.SetAuthMode("required")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"llama3.2:latest",
+		"messages":[{"role":"user","content":"hello"}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer toot_api_test")
+	rr := httptest.NewRecorder()
+	p.handleChatCompletions(rr, req)
+
+	if rr.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status=%d want %d", rr.Result().StatusCode, http.StatusOK)
+	}
+	if !store.reservePrepaidCalled {
+		t.Fatal("expected reserve prepaid to be called")
+	}
+	if !store.finalizePrepaidCalled {
+		t.Fatal("expected finalize prepaid to be called")
+	}
+}
+
 func TestHandleNetworkNodes(t *testing.T) {
 	t.Parallel()
 	reg := registry.New(time.Minute)
