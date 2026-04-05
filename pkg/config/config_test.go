@@ -246,7 +246,7 @@ models:
 	}
 }
 
-func TestLoadOfficialGatewayRequiresRedisAndPostgres(t *testing.T) {
+func TestLoadOfficialGatewayRequiresControlTokenAndPostgres(t *testing.T) {
 	t.Parallel()
 	d := t.TempDir()
 	p := filepath.Join(d, "official-invalid.yaml")
@@ -298,9 +298,6 @@ gateway:
   mode: "official"
   auth_mode: "required"
   control_api_token: "dev-official-token"
-  redis:
-    addr: "127.0.0.1:6379"
-    db: 0
   postgres:
     dsn: "postgres://tooti:tooti@127.0.0.1:5432/tooti?sslmode=disable"
 `), 0o644)

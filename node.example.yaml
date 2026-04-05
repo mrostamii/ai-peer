@@ -57,7 +57,7 @@ metrics:
 gateway:
   listen: "127.0.0.1:8080"
   # community: local/self-hosted gateway with no official datastore credentials
-  # official: hosted gateway that uses shared Redis + PostgreSQL state
+  # official: hosted gateway that uses PostgreSQL (Redis hot-path is future)
   mode: "community"
   # Required when mode=official. Used for privileged control endpoints.
   control_api_token: ""
@@ -71,7 +71,8 @@ gateway:
     batch_max_events: 200
     flush_interval_sec: 60
   redis:
-    # Required only when gateway.mode=official
+    # Optional. Official mode does not use Redis in the binary yet (PostgreSQL
+    # only). Leave empty until hot-path Redis is implemented.
     addr: ""
     password: ""
     db: 0

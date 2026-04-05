@@ -26,5 +26,5 @@ psql "$DATABASE_URL" -f db/migrations/0004_phase2_prepaid_balance_state.sql
 
 - Community/local gateways should not receive any database credentials.
 - Official gateways write financial/business truth into PostgreSQL.
-- Redis is intended for hot-path auth/balance checks and is not the durable
-  accounting source of truth.
+- Redis for sub-ms hot-path auth/balance is planned; the gateway binary does
+  not use Redis yet, so `gateway.redis` in config is optional.

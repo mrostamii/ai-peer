@@ -277,12 +277,11 @@ func (c *Config) Validate() error {
 		if c.Gateway.ControlAPIToken == "" {
 			return fmt.Errorf("gateway.mode=official requires gateway.control_api_token")
 		}
-		if c.Gateway.Redis.Addr == "" {
-			return fmt.Errorf("gateway.mode=official requires gateway.redis.addr")
-		}
 		if c.Gateway.Postgres.DSN == "" {
 			return fmt.Errorf("gateway.mode=official requires gateway.postgres.dsn")
 		}
+		// Redis is optional: official hot-path cache/Lua scripts are not wired yet.
+		// When gateway.redis.addr is set, future versions will use it; omit until then.
 	}
 	for model, pricing := range c.Models.ModelPricing {
 		if err := validateX402ModelPricing("models.model_pricing", model, pricing); err != nil {
