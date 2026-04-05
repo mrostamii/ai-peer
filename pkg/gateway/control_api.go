@@ -73,6 +73,18 @@ type PrepaidReserveResult struct {
 	BalanceAfter float64
 }
 
+type PrepaidDepositRecord struct {
+	TxHash        string
+	Network       string
+	ConsumerID    string
+	WalletAddress string
+	TokenAddress  string
+	ToAddress     string
+	AmountAtomic  string
+	AmountUSDC    float64
+	BlockNumber   int64
+}
+
 type TelemetryUsageBatchRequest struct {
 	GatewayID     string       `json:"gateway_id"`
 	GatewayPubKey string       `json:"gateway_pubkey"`
@@ -102,9 +114,12 @@ type ControlStore interface {
 	UpsertConsumerAPIKey(context.Context, string, string, string, string) error
 	RevokeConsumerAPIKey(context.Context, string, string, string) (bool, error)
 	LookupActiveAPIKey(context.Context, string) (*APIKeyPrincipal, error)
+	LookupConsumerAPIKeyHash(context.Context, string) (string, error)
 	ReservePrepaidBalance(context.Context, string, string, float64) (PrepaidReserveResult, error)
 	FinalizePrepaidCharge(context.Context, string, string, float64, bool) (float64, error)
 	CreditConsumerBalance(context.Context, string, float64, string) error
+	CurrentConsumerBalance(context.Context, string) (float64, error)
+	RecordPrepaidDeposit(context.Context, PrepaidDepositRecord) (bool, error)
 }
 
 func (p *OpenAIProxy) handleProviderRegister(w http.ResponseWriter, r *http.Request) {
@@ -498,6 +513,146 @@ func (p *OpenAIProxy) handlePrepaidDepositConfirm(w http.ResponseWriter, r *http
 	})
 }
 
+func (p *OpenAIProxy) handlePrepaidPay(w http.ResponseWriter, r *http.Request) {
+	store := p.requireControlStore(w)
+	if store == nil {
+		return
+	}
+	var req struct {
+		TxHash        string `json:"tx_hash"`
+		Network       string `json:"network"`
+		WalletAddress string `json:"wallet_address"`
+	}
+	if err := decodeJSONBody(r.Body, &req); err != nil {
+		_ = writeJSON(w, http.StatusBadRequest, openAIError(http.StatusBadRequest, err.Error()))
+		return
+	}
+	req.TxHash = strings.TrimSpace(req.TxHash)
+	req.Network = strings.TrimSpace(req.Network)
+	req.WalletAddress = strings.TrimSpace(req.WalletAddress)
+	if req.TxHash == "" {
+		_ = writeJSON(w, http.StatusBadRequest, openAIError(http.StatusBadRequest, "tx_hash is required"))
+		return
+	}
+	verified, err := p.verifyPrepaidDepositTx(r.Context(), req.Network, req.TxHash, req.WalletAddress)
+	if err != nil {
+		_ = writeJSON(w, http.StatusBadRequest, openAIError(http.StatusBadRequest, "deposit verification failed: "+err.Error()))
+		return
+	}
+	consumerID := consumerIDFromWallet(verified.FromWallet)
+	inserted, err := store.RecordPrepaidDeposit(r.Context(), PrepaidDepositRecord{
+		TxHash:        verified.TxHash,
+		Network:       verified.Network,
+		ConsumerID:    consumerID,
+		WalletAddress: verified.FromWallet,
+		TokenAddress:  verified.TokenAddress,
+		ToAddress:     verified.ToWallet,
+		AmountAtomic:  verified.AmountAtomic,
+		AmountUSDC:    verified.AmountUSDC,
+		BlockNumber:   verified.BlockNumber,
+	})
+	if err != nil {
+		_ = writeJSON(w, http.StatusInternalServerError, openAIError(http.StatusInternalServerError, "failed to record prepaid deposit"))
+		return
+	}
+
+	existingHash, err := store.LookupConsumerAPIKeyHash(r.Context(), consumerID)
+	if err != nil {
+		_ = writeJSON(w, http.StatusInternalServerError, openAIError(http.StatusInternalServerError, "failed to read consumer api key state"))
+		return
+	}
+	var newAPIKey string
+	if strings.TrimSpace(existingHash) == "" {
+		newAPIKey, err = generateAPIKey()
+		if err != nil {
+			_ = writeJSON(w, http.StatusInternalServerError, openAIError(http.StatusInternalServerError, "failed to generate api key"))
+			return
+		}
+		if err := store.UpsertConsumerAPIKey(r.Context(), consumerID, verified.FromWallet, "prepaid", hashAPIKey(newAPIKey)); err != nil {
+			_ = writeJSON(w, http.StatusInternalServerError, openAIError(http.StatusInternalServerError, "failed to persist api key"))
+			return
+		}
+	}
+	balance, err := store.CurrentConsumerBalance(r.Context(), consumerID)
+	if err != nil {
+		_ = writeJSON(w, http.StatusInternalServerError, openAIError(http.StatusInternalServerError, "failed to read prepaid balance"))
+		return
+	}
+	resp := map[string]any{
+		"ok":           true,
+		"consumer_id":  consumerID,
+		"wallet":       verified.FromWallet,
+		"amount_usdc":  verified.AmountUSDC,
+		"balance_usdc": balance,
+		"tx_hash":      verified.TxHash,
+		"idempotent":   !inserted,
+	}
+	if newAPIKey != "" {
+		resp["api_key"] = newAPIKey
+		resp["api_key_created"] = true
+	} else {
+		resp["api_key_created"] = false
+	}
+	_ = writeJSON(w, http.StatusOK, resp)
+}
+
+func (p *OpenAIProxy) handlePrepaidBalance(w http.ResponseWriter, r *http.Request) {
+	store := p.requireControlStore(w)
+	if store == nil {
+		return
+	}
+	principal, _, ok := p.requireStrictAPIKey(w, r)
+	if !ok {
+		return
+	}
+	balance, err := store.CurrentConsumerBalance(r.Context(), principal.ConsumerID)
+	if err != nil {
+		_ = writeJSON(w, http.StatusInternalServerError, openAIError(http.StatusInternalServerError, "failed to read prepaid balance"))
+		return
+	}
+	_ = writeJSON(w, http.StatusOK, map[string]any{
+		"ok":            true,
+		"consumer_id":   principal.ConsumerID,
+		"consumer_type": principal.ConsumerType,
+		"wallet":        principal.WalletAddress,
+		"balance_usdc":  balance,
+	})
+}
+
+func (p *OpenAIProxy) handlePrepaidRotateAPIKey(w http.ResponseWriter, r *http.Request) {
+	store := p.requireControlStore(w)
+	if store == nil {
+		return
+	}
+	principal, oldHash, ok := p.requireStrictAPIKey(w, r)
+	if !ok {
+		return
+	}
+	revoked, err := store.RevokeConsumerAPIKey(r.Context(), principal.ConsumerID, oldHash, "self-rotated")
+	if err != nil {
+		_ = writeJSON(w, http.StatusInternalServerError, openAIError(http.StatusInternalServerError, "failed to revoke api key"))
+		return
+	}
+	if !revoked {
+		_ = writeJSON(w, http.StatusNotFound, openAIError(http.StatusNotFound, "active api key not found"))
+		return
+	}
+	newAPIKey, err := generateAPIKey()
+	if err != nil {
+		_ = writeJSON(w, http.StatusInternalServerError, openAIError(http.StatusInternalServerError, "failed to generate api key"))
+		return
+	}
+	if err := store.UpsertConsumerAPIKey(r.Context(), principal.ConsumerID, principal.WalletAddress, principal.ConsumerType, hashAPIKey(newAPIKey)); err != nil {
+		_ = writeJSON(w, http.StatusInternalServerError, openAIError(http.StatusInternalServerError, "failed to persist new api key"))
+		return
+	}
+	_ = writeJSON(w, http.StatusOK, map[string]any{
+		"ok":          true,
+		"consumer_id": principal.ConsumerID,
+		"new_api_key": newAPIKey,
+	})
+}
+
 func (p *OpenAIProxy) handleUsageList(w http.ResponseWriter, r *http.Request) {
 	store := p.requireControlStore(w)
 	if store == nil {
@@ -536,6 +691,34 @@ func (p *OpenAIProxy) requireControlStore(w http.ResponseWriter) ControlStore {
 		return nil
 	}
 	return p.controlStore
+}
+
+func (p *OpenAIProxy) requireStrictAPIKey(w http.ResponseWriter, r *http.Request) (*APIKeyPrincipal, string, bool) {
+	if p.controlStore == nil {
+		_ = writeJSON(w, http.StatusServiceUnavailable, openAIError(http.StatusServiceUnavailable, "api key validation unavailable"))
+		return nil, "", false
+	}
+	raw := extractAPIKey(r)
+	if strings.TrimSpace(raw) == "" {
+		_ = writeJSON(w, http.StatusUnauthorized, openAIError(http.StatusUnauthorized, "api key required"))
+		return nil, "", false
+	}
+	hash := hashAPIKey(raw)
+	principal, err := p.controlStore.LookupActiveAPIKey(r.Context(), hash)
+	if err != nil {
+		_ = writeJSON(w, http.StatusInternalServerError, openAIError(http.StatusInternalServerError, "api key validation failed"))
+		return nil, "", false
+	}
+	if principal == nil {
+		_ = writeJSON(w, http.StatusUnauthorized, openAIError(http.StatusUnauthorized, "invalid api key"))
+		return nil, "", false
+	}
+	return principal, hash, true
+}
+
+func consumerIDFromWallet(wallet string) string {
+	addr := strings.ToLower(strings.TrimSpace(wallet))
+	return "wallet:" + addr
 }
 
 func decodeJSONBody(r io.Reader, out any) error {

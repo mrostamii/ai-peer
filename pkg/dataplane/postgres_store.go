@@ -321,6 +321,28 @@ func (s *PostgresStore) LookupActiveAPIKey(ctx context.Context, apiKeyHash strin
 	return &p, nil
 }
 
+func (s *PostgresStore) LookupConsumerAPIKeyHash(ctx context.Context, consumerID string) (string, error) {
+	consumerID = strings.TrimSpace(consumerID)
+	if consumerID == "" {
+		return "", nil
+	}
+	var hash *string
+	if err := s.pool.QueryRow(ctx, `
+		SELECT api_key_hash
+		FROM consumers
+		WHERE consumer_id = $1
+	`, consumerID).Scan(&hash); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("lookup consumer api key hash: %w", err)
+	}
+	if hash == nil {
+		return "", nil
+	}
+	return strings.TrimSpace(*hash), nil
+}
+
 func (s *PostgresStore) ReservePrepaidBalance(ctx context.Context, consumerID, requestID string, reserveUSDC float64) (gateway.PrepaidReserveResult, error) {
 	if reserveUSDC <= 0 {
 		return gateway.PrepaidReserveResult{}, fmt.Errorf("reserve amount must be > 0")
@@ -522,6 +544,102 @@ func (s *PostgresStore) CreditConsumerBalance(ctx context.Context, consumerID st
 		return fmt.Errorf("commit credit balance tx: %w", err)
 	}
 	return nil
+}
+
+func (s *PostgresStore) RecordPrepaidDeposit(ctx context.Context, rec gateway.PrepaidDepositRecord) (bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin record prepaid deposit tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	rec.TxHash = strings.TrimSpace(strings.ToLower(rec.TxHash))
+	rec.ConsumerID = strings.TrimSpace(rec.ConsumerID)
+	rec.WalletAddress = strings.TrimSpace(strings.ToLower(rec.WalletAddress))
+	rec.TokenAddress = strings.TrimSpace(strings.ToLower(rec.TokenAddress))
+	rec.ToAddress = strings.TrimSpace(strings.ToLower(rec.ToAddress))
+	rec.Network = strings.TrimSpace(rec.Network)
+	rec.AmountAtomic = strings.TrimSpace(rec.AmountAtomic)
+	if rec.TxHash == "" || rec.ConsumerID == "" || rec.AmountUSDC <= 0 {
+		return false, fmt.Errorf("tx_hash, consumer_id, and amount_usdc are required")
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO consumers (consumer_id, api_key_hash, wallet_address, consumer_type)
+		VALUES ($1, NULL, NULLIF($2,''), 'prepaid')
+		ON CONFLICT (consumer_id) DO UPDATE
+		SET wallet_address = COALESCE(EXCLUDED.wallet_address, consumers.wallet_address),
+			consumer_type = 'prepaid'
+	`, rec.ConsumerID, rec.WalletAddress)
+	if err != nil {
+		return false, fmt.Errorf("ensure consumer row for deposit: %w", err)
+	}
+
+	res, err := tx.Exec(ctx, `
+		INSERT INTO prepaid_deposits (
+			tx_hash, network, consumer_id, wallet_address, token_address,
+			to_address, amount_atomic, amount_usdc, block_number
+		)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+		ON CONFLICT (tx_hash) DO NOTHING
+	`, rec.TxHash, rec.Network, rec.ConsumerID, rec.WalletAddress, rec.TokenAddress, rec.ToAddress, rec.AmountAtomic, rec.AmountUSDC, rec.BlockNumber)
+	if err != nil {
+		return false, fmt.Errorf("insert prepaid deposit: %w", err)
+	}
+	if res.RowsAffected() == 0 {
+		return false, nil
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO consumer_balances (consumer_id, current_balance)
+		VALUES ($1, 0)
+		ON CONFLICT (consumer_id) DO NOTHING
+	`, rec.ConsumerID)
+	if err != nil {
+		return false, fmt.Errorf("ensure consumer balance row for deposit: %w", err)
+	}
+
+	currentBalance, err := queryCurrentBalanceForUpdate(ctx, tx, rec.ConsumerID)
+	if err != nil {
+		return false, err
+	}
+	balanceAfter := currentBalance + rec.AmountUSDC
+	if _, err := tx.Exec(ctx, `
+		UPDATE consumer_balances
+		SET current_balance = $2, updated_at = NOW()
+		WHERE consumer_id = $1
+	`, rec.ConsumerID, balanceAfter); err != nil {
+		return false, fmt.Errorf("update consumer balance after deposit: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO balance_ledger (consumer_id, entry_type, amount_usdc, reference, balance_after)
+		VALUES ($1, 'credit', $2, $3, $4)
+	`, rec.ConsumerID, rec.AmountUSDC, "deposit:"+rec.TxHash, balanceAfter); err != nil {
+		return false, fmt.Errorf("insert deposit balance ledger: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit record prepaid deposit tx: %w", err)
+	}
+	return true, nil
+}
+
+func (s *PostgresStore) CurrentConsumerBalance(ctx context.Context, consumerID string) (float64, error) {
+	consumerID = strings.TrimSpace(consumerID)
+	if consumerID == "" {
+		return 0, fmt.Errorf("consumer_id is required")
+	}
+	var balance float64
+	if err := s.pool.QueryRow(ctx, `
+		SELECT current_balance
+		FROM consumer_balances
+		WHERE consumer_id = $1
+	`, consumerID).Scan(&balance); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("query consumer balance: %w", err)
+	}
+	return balance, nil
 }
 
 func queryCurrentBalanceForUpdate(ctx context.Context, tx pgx.Tx, consumerID string) (float64, error) {

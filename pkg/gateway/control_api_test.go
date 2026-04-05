@@ -26,6 +26,10 @@ type mockControlStore struct {
 	reservePrepaidResult    PrepaidReserveResult
 	finalizePrepaidCalled   bool
 	creditBalanceCalled     bool
+	currentBalance          float64
+	consumerAPIKeyHash      string
+	recordPrepaidCalled     bool
+	recordPrepaidInserted   bool
 	usageEvents             []UsageEvent
 }
 
@@ -72,6 +76,10 @@ func (m *mockControlStore) LookupActiveAPIKey(_ context.Context, _ string) (*API
 	return m.lookupAPIKeyResult, nil
 }
 
+func (m *mockControlStore) LookupConsumerAPIKeyHash(_ context.Context, _ string) (string, error) {
+	return m.consumerAPIKeyHash, nil
+}
+
 func (m *mockControlStore) ReservePrepaidBalance(_ context.Context, _ string, _ string, _ float64) (PrepaidReserveResult, error) {
 	m.reservePrepaidCalled = true
 	return m.reservePrepaidResult, nil
@@ -85,6 +93,15 @@ func (m *mockControlStore) FinalizePrepaidCharge(_ context.Context, _ string, _ 
 func (m *mockControlStore) CreditConsumerBalance(_ context.Context, _ string, _ float64, _ string) error {
 	m.creditBalanceCalled = true
 	return nil
+}
+
+func (m *mockControlStore) CurrentConsumerBalance(_ context.Context, _ string) (float64, error) {
+	return m.currentBalance, nil
+}
+
+func (m *mockControlStore) RecordPrepaidDeposit(_ context.Context, _ PrepaidDepositRecord) (bool, error) {
+	m.recordPrepaidCalled = true
+	return m.recordPrepaidInserted, nil
 }
 
 func TestHandleProviderRegisterRequiresControlStore(t *testing.T) {

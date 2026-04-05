@@ -34,6 +34,7 @@ type OpenAIProxy struct {
 	firstTokenTimeout   time.Duration
 	totalRequestTimeout time.Duration
 	chatPaywall         *X402PaywallConfig
+	prepaidOnchain      *PrepaidOnchainConfig
 }
 
 const maxRemoteRetries = 2
@@ -159,6 +160,9 @@ func (p *OpenAIProxy) Run(ctx context.Context) error {
 	mux.HandleFunc("POST /v1/auth/api-keys/revoke", p.handleAPIKeysRevoke)
 	mux.HandleFunc("POST /v1/auth/api-keys/rotate", p.handleAPIKeysRotate)
 	mux.HandleFunc("POST /v1/prepaid/deposits/confirm", p.handlePrepaidDepositConfirm)
+	mux.HandleFunc("POST /v1/prepaid/pay", p.handlePrepaidPay)
+	mux.HandleFunc("GET /v1/prepaid/balance", p.handlePrepaidBalance)
+	mux.HandleFunc("POST /v1/prepaid/api-keys/rotate", p.handlePrepaidRotateAPIKey)
 	mux.HandleFunc("GET /v1/usage", p.handleUsageList)
 	if p.reg != nil {
 		mux.HandleFunc("GET /v1/network/nodes", p.handleNetworkNodes)

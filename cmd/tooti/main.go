@@ -37,6 +37,7 @@ func main() {
 		fmt.Println("tooti")
 		fmt.Println("usage: tooti config-check -file ./node.yaml")
 		fmt.Println("usage: tooti pay chat -url http://127.0.0.1:8080/v1/chat/completions -model qwen2.5:3b -message \"say hi\"")
+		fmt.Println("usage: tooti pay topup -gateway http://127.0.0.1:8080 -amount-usdc 5 -rpc-url https://... -receiver 0x...")
 		return
 	}
 
@@ -214,6 +215,11 @@ func runGatewayStart(args []string) {
 	x402PayTo := fs.String("x402-payto", "", "x402 recipient wallet address")
 	x402TokenName := fs.String("x402-token-name", "USDC", "x402 token name for EIP-712 domain")
 	x402TokenVersion := fs.String("x402-token-version", "2", "x402 token version for EIP-712 domain")
+	prepaidNetwork := fs.String("prepaid-network", "eip155:84532", "prepaid network in CAIP-2 format")
+	prepaidRPCURL := fs.String("prepaid-rpc-url", "", "RPC URL for on-chain prepaid deposit verification")
+	prepaidToken := fs.String("prepaid-token", "0x036CbD53842c5426634e7929541eC2318f3dCF7e", "USDC token contract used for prepaid deposits")
+	prepaidReceiver := fs.String("prepaid-receiver", "", "wallet address that receives prepaid deposits (defaults to -x402-payto)")
+	prepaidConfirmations := fs.Int64("prepaid-confirmations", 1, "minimum confirmations required before crediting prepaid deposits")
 	_ = fs.Parse(args)
 
 	cfg, err := config.Load(*file)
@@ -340,6 +346,24 @@ func runGatewayStart(args []string) {
 		}()
 		proxy.SetControlStore(store)
 		log.Printf("official gateway control store enabled (postgres)")
+
+		receiver := strings.TrimSpace(*prepaidReceiver)
+		if receiver == "" {
+			receiver = strings.TrimSpace(*x402PayTo)
+		}
+		if strings.TrimSpace(*prepaidRPCURL) != "" && receiver != "" {
+			proxy.SetPrepaidOnchainConfig(&gateway.PrepaidOnchainConfig{
+				Network:         strings.TrimSpace(*prepaidNetwork),
+				RPCURL:          strings.TrimSpace(*prepaidRPCURL),
+				TokenAddress:    strings.TrimSpace(*prepaidToken),
+				ReceiverAddress: receiver,
+				Confirmations:   *prepaidConfirmations,
+			})
+			log.Printf("prepaid on-chain verification enabled network=%s receiver=%s token=%s confirmations=%d",
+				strings.TrimSpace(*prepaidNetwork), receiver, strings.TrimSpace(*prepaidToken), *prepaidConfirmations)
+		} else {
+			log.Printf("prepaid on-chain verification disabled (set -prepaid-rpc-url and -prepaid-receiver or -x402-payto)")
+		}
 	} else {
 		log.Printf("community gateway mode (control store disabled)")
 	}
@@ -759,11 +783,24 @@ func runNetworkModels(args []string) {
 func runPay(args []string) {
 	if len(args) == 0 {
 		fmt.Println("usage: tooti pay chat -url http://127.0.0.1:8080/v1/chat/completions -model qwen2.5:3b -message \"say hi\"")
+		fmt.Println("usage: tooti pay topup -gateway http://127.0.0.1:8080 -amount-usdc 5 -rpc-url https://... -receiver 0x...")
+		fmt.Println("usage: tooti pay balance -gateway http://127.0.0.1:8080")
+		fmt.Println("usage: tooti pay rotate-key -gateway http://127.0.0.1:8080")
 		os.Exit(2)
+	}
+	if amount, ok := parsePayAmountShortcut(args[0]); ok {
+		runPayTopup(append([]string{"-amount-usdc", fmt.Sprintf("%.6f", amount)}, args[1:]...))
+		return
 	}
 	switch args[0] {
 	case "chat":
 		runPayChat(args[1:])
+	case "topup":
+		runPayTopup(args[1:])
+	case "balance":
+		runPayBalance(args[1:])
+	case "rotate-key":
+		runPayRotateKey(args[1:])
 	default:
 		fmt.Printf("unknown pay command: %s\n", args[0])
 		os.Exit(2)
