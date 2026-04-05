@@ -546,81 +546,81 @@ func (s *PostgresStore) CreditConsumerBalance(ctx context.Context, consumerID st
 	return nil
 }
 
-func (s *PostgresStore) RecordPrepaidDeposit(ctx context.Context, rec gateway.PrepaidDepositRecord) (bool, error) {
+func (s *PostgresStore) RecordX402PrepaidTopup(ctx context.Context, consumerID, paymentFingerprint string, amountUSDC float64) (bool, float64, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return false, fmt.Errorf("begin record prepaid deposit tx: %w", err)
+		return false, 0, fmt.Errorf("begin x402 prepaid topup tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	rec.TxHash = strings.TrimSpace(strings.ToLower(rec.TxHash))
-	rec.ConsumerID = strings.TrimSpace(rec.ConsumerID)
-	rec.WalletAddress = strings.TrimSpace(strings.ToLower(rec.WalletAddress))
-	rec.TokenAddress = strings.TrimSpace(strings.ToLower(rec.TokenAddress))
-	rec.ToAddress = strings.TrimSpace(strings.ToLower(rec.ToAddress))
-	rec.Network = strings.TrimSpace(rec.Network)
-	rec.AmountAtomic = strings.TrimSpace(rec.AmountAtomic)
-	if rec.TxHash == "" || rec.ConsumerID == "" || rec.AmountUSDC <= 0 {
-		return false, fmt.Errorf("tx_hash, consumer_id, and amount_usdc are required")
+	consumerID = strings.TrimSpace(consumerID)
+	paymentFingerprint = strings.TrimSpace(paymentFingerprint)
+	if consumerID == "" || paymentFingerprint == "" || amountUSDC <= 0 {
+		return false, 0, fmt.Errorf("consumer_id, payment_fingerprint, and amount_usdc are required")
 	}
 
 	_, err = tx.Exec(ctx, `
 		INSERT INTO consumers (consumer_id, api_key_hash, wallet_address, consumer_type)
-		VALUES ($1, NULL, NULLIF($2,''), 'prepaid')
+		VALUES ($1, NULL, NULL, 'prepaid')
 		ON CONFLICT (consumer_id) DO UPDATE
-		SET wallet_address = COALESCE(EXCLUDED.wallet_address, consumers.wallet_address),
-			consumer_type = 'prepaid'
-	`, rec.ConsumerID, rec.WalletAddress)
+		SET consumer_type = 'prepaid'
+	`, consumerID)
 	if err != nil {
-		return false, fmt.Errorf("ensure consumer row for deposit: %w", err)
+		return false, 0, fmt.Errorf("ensure consumer row for x402 topup: %w", err)
 	}
 
 	res, err := tx.Exec(ctx, `
-		INSERT INTO prepaid_deposits (
-			tx_hash, network, consumer_id, wallet_address, token_address,
-			to_address, amount_atomic, amount_usdc, block_number
+		INSERT INTO x402_prepaid_topups (
+			payment_fingerprint, consumer_id, amount_usdc
 		)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-		ON CONFLICT (tx_hash) DO NOTHING
-	`, rec.TxHash, rec.Network, rec.ConsumerID, rec.WalletAddress, rec.TokenAddress, rec.ToAddress, rec.AmountAtomic, rec.AmountUSDC, rec.BlockNumber)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (payment_fingerprint) DO NOTHING
+	`, paymentFingerprint, consumerID, amountUSDC)
 	if err != nil {
-		return false, fmt.Errorf("insert prepaid deposit: %w", err)
+		return false, 0, fmt.Errorf("insert x402_prepaid_topups: %w", err)
 	}
 	if res.RowsAffected() == 0 {
-		return false, nil
+		balance, err := queryCurrentBalanceForUpdate(ctx, tx, consumerID)
+		if err != nil {
+			return false, 0, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return false, 0, fmt.Errorf("commit x402 prepaid topup idempotent tx: %w", err)
+		}
+		return false, balance, nil
 	}
 
 	_, err = tx.Exec(ctx, `
 		INSERT INTO consumer_balances (consumer_id, current_balance)
 		VALUES ($1, 0)
 		ON CONFLICT (consumer_id) DO NOTHING
-	`, rec.ConsumerID)
+	`, consumerID)
 	if err != nil {
-		return false, fmt.Errorf("ensure consumer balance row for deposit: %w", err)
+		return false, 0, fmt.Errorf("ensure consumer balance row for x402 topup: %w", err)
 	}
 
-	currentBalance, err := queryCurrentBalanceForUpdate(ctx, tx, rec.ConsumerID)
+	currentBalance, err := queryCurrentBalanceForUpdate(ctx, tx, consumerID)
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
-	balanceAfter := currentBalance + rec.AmountUSDC
+	balanceAfter := currentBalance + amountUSDC
 	if _, err := tx.Exec(ctx, `
 		UPDATE consumer_balances
 		SET current_balance = $2, updated_at = NOW()
 		WHERE consumer_id = $1
-	`, rec.ConsumerID, balanceAfter); err != nil {
-		return false, fmt.Errorf("update consumer balance after deposit: %w", err)
+	`, consumerID, balanceAfter); err != nil {
+		return false, 0, fmt.Errorf("update consumer balance after x402 topup: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO balance_ledger (consumer_id, entry_type, amount_usdc, reference, balance_after)
 		VALUES ($1, 'credit', $2, $3, $4)
-	`, rec.ConsumerID, rec.AmountUSDC, "deposit:"+rec.TxHash, balanceAfter); err != nil {
-		return false, fmt.Errorf("insert deposit balance ledger: %w", err)
+	`, consumerID, amountUSDC, "x402_topup:"+paymentFingerprint, balanceAfter); err != nil {
+		return false, 0, fmt.Errorf("insert x402 topup balance ledger: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return false, fmt.Errorf("commit record prepaid deposit tx: %w", err)
+		return false, 0, fmt.Errorf("commit x402 prepaid topup tx: %w", err)
 	}
-	return true, nil
+	return true, balanceAfter, nil
 }
 
 func (s *PostgresStore) CurrentConsumerBalance(ctx context.Context, consumerID string) (float64, error) {

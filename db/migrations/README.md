@@ -14,6 +14,8 @@ Phase 2 introduces an official gateway data plane and durable accounting schema.
   request reservation state for reserve/finalize flow.
 - `0005_phase2_prepaid_deposits.sql`: on-chain prepaid deposit idempotency and
   audit records keyed by transaction hash.
+- `0006_phase2_x402_prepaid_topups.sql`: idempotency table for x402 prepaid
+  topup flow keyed by payment fingerprint.
 
 ## Apply manually
 
@@ -23,6 +25,7 @@ psql "$DATABASE_URL" -f db/migrations/0002_phase2_control_security.sql
 psql "$DATABASE_URL" -f db/migrations/0003_phase2_api_key_lifecycle.sql
 psql "$DATABASE_URL" -f db/migrations/0004_phase2_prepaid_balance_state.sql
 psql "$DATABASE_URL" -f db/migrations/0005_phase2_prepaid_deposits.sql
+psql "$DATABASE_URL" -f db/migrations/0006_phase2_x402_prepaid_topups.sql
 ```
 
 ## Notes

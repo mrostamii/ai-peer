@@ -46,6 +46,10 @@ func (p *OpenAIProxy) SetX402ChatPaywall(cfg *X402PaywallConfig) {
 	p.chatPaywall = cfg
 }
 
+func (p *OpenAIProxy) SetX402PrepaidTopupPaywall(cfg *X402PaywallConfig) {
+	p.prepaidTopupPaywall = cfg
+}
+
 func (p *OpenAIProxy) enforceChatPayment(w http.ResponseWriter, r *http.Request, oreq *openAIChatRequest) bool {
 	if p.chatPaywall == nil {
 		return true

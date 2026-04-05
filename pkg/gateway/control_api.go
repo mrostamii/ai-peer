@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mrostamii/tooti/pkg/x402spike"
 )
 
 type ProviderRegisterRequest struct {
@@ -73,18 +75,6 @@ type PrepaidReserveResult struct {
 	BalanceAfter float64
 }
 
-type PrepaidDepositRecord struct {
-	TxHash        string
-	Network       string
-	ConsumerID    string
-	WalletAddress string
-	TokenAddress  string
-	ToAddress     string
-	AmountAtomic  string
-	AmountUSDC    float64
-	BlockNumber   int64
-}
-
 type TelemetryUsageBatchRequest struct {
 	GatewayID     string       `json:"gateway_id"`
 	GatewayPubKey string       `json:"gateway_pubkey"`
@@ -119,7 +109,7 @@ type ControlStore interface {
 	FinalizePrepaidCharge(context.Context, string, string, float64, bool) (float64, error)
 	CreditConsumerBalance(context.Context, string, float64, string) error
 	CurrentConsumerBalance(context.Context, string) (float64, error)
-	RecordPrepaidDeposit(context.Context, PrepaidDepositRecord) (bool, error)
+	RecordX402PrepaidTopup(context.Context, string, string, float64) (bool, float64, error)
 }
 
 func (p *OpenAIProxy) handleProviderRegister(w http.ResponseWriter, r *http.Request) {
@@ -513,46 +503,92 @@ func (p *OpenAIProxy) handlePrepaidDepositConfirm(w http.ResponseWriter, r *http
 	})
 }
 
-func (p *OpenAIProxy) handlePrepaidPay(w http.ResponseWriter, r *http.Request) {
+func (p *OpenAIProxy) handlePrepaidTopup(w http.ResponseWriter, r *http.Request) {
 	store := p.requireControlStore(w)
 	if store == nil {
 		return
 	}
 	var req struct {
-		TxHash        string `json:"tx_hash"`
-		Network       string `json:"network"`
-		WalletAddress string `json:"wallet_address"`
+		AmountUSDC float64 `json:"amount_usdc"`
 	}
 	if err := decodeJSONBody(r.Body, &req); err != nil {
 		_ = writeJSON(w, http.StatusBadRequest, openAIError(http.StatusBadRequest, err.Error()))
 		return
 	}
-	req.TxHash = strings.TrimSpace(req.TxHash)
-	req.Network = strings.TrimSpace(req.Network)
-	req.WalletAddress = strings.TrimSpace(req.WalletAddress)
-	if req.TxHash == "" {
-		_ = writeJSON(w, http.StatusBadRequest, openAIError(http.StatusBadRequest, "tx_hash is required"))
+	if req.AmountUSDC <= 0 {
+		_ = writeJSON(w, http.StatusBadRequest, openAIError(http.StatusBadRequest, "amount_usdc must be > 0"))
 		return
 	}
-	verified, err := p.verifyPrepaidDepositTx(r.Context(), req.Network, req.TxHash, req.WalletAddress)
-	if err != nil {
-		_ = writeJSON(w, http.StatusBadRequest, openAIError(http.StatusBadRequest, "deposit verification failed: "+err.Error()))
+	if p.prepaidTopupPaywall == nil {
+		_ = writeJSON(w, http.StatusServiceUnavailable, openAIError(http.StatusServiceUnavailable, "x402 topup unavailable"))
 		return
 	}
-	consumerID := consumerIDFromWallet(verified.FromWallet)
-	inserted, err := store.RecordPrepaidDeposit(r.Context(), PrepaidDepositRecord{
-		TxHash:        verified.TxHash,
-		Network:       verified.Network,
-		ConsumerID:    consumerID,
-		WalletAddress: verified.FromWallet,
-		TokenAddress:  verified.TokenAddress,
-		ToAddress:     verified.ToWallet,
-		AmountAtomic:  verified.AmountAtomic,
-		AmountUSDC:    verified.AmountUSDC,
-		BlockNumber:   verified.BlockNumber,
-	})
+	requirement := p.prepaidTopupPaywall.Requirement
+	atomicAmount, err := usdcAmountToAtomicString(req.AmountUSDC)
 	if err != nil {
-		_ = writeJSON(w, http.StatusInternalServerError, openAIError(http.StatusInternalServerError, "failed to record prepaid deposit"))
+		_ = writeJSON(w, http.StatusBadRequest, openAIError(http.StatusBadRequest, err.Error()))
+		return
+	}
+	requirement.Amount = atomicAmount
+	paymentRequired := x402spike.PaymentRequired{
+		X402Version: 2,
+		Error:       "PAYMENT-SIGNATURE header is required",
+		Resource: x402spike.ResourceInfo{
+			URL:         requestURL(r),
+			Description: "prepaid topup request",
+			MimeType:    "application/json",
+		},
+		Accepts:    []x402spike.PaymentRequirements{requirement},
+		Extensions: map[string]any{"intent": "prepaid_topup"},
+	}
+	paymentHeader := strings.TrimSpace(r.Header.Get("PAYMENT-SIGNATURE"))
+	if paymentHeader == "" {
+		writePaymentRequired(w, paymentRequired, x402spike.SettlementResponse{})
+		return
+	}
+	var payload x402spike.PaymentPayload
+	if err := x402spike.DecodeBase64JSON(paymentHeader, &payload); err != nil {
+		paymentRequired.Error = "invalid PAYMENT-SIGNATURE header"
+		writePaymentRequired(w, paymentRequired, x402spike.SettlementResponse{})
+		return
+	}
+	if err := validateAcceptedPayment(payload.Accepted, requirement); err != nil {
+		paymentRequired.Error = err.Error()
+		writePaymentRequired(w, paymentRequired, x402spike.SettlementResponse{})
+		return
+	}
+	settle := x402spike.SettlementResponse{
+		Success:     true,
+		Payer:       payload.Payload.Authorization.From,
+		Transaction: "x402-topup-local",
+		Network:     payload.Accepted.Network,
+	}
+	if strings.TrimSpace(p.prepaidTopupPaywall.FacilitatorURL) != "" {
+		settled, _, _, err := settleWithFacilitator(p.prepaidTopupPaywall.FacilitatorURL, payload, requirement)
+		if err != nil {
+			paymentRequired.Error = "facilitator error: " + err.Error()
+			writePaymentRequired(w, paymentRequired, x402spike.SettlementResponse{})
+			return
+		}
+		if !settled.Success {
+			reason := strings.TrimSpace(settled.ErrorReason)
+			if reason == "" {
+				reason = "payment settlement failed"
+			}
+			paymentRequired.Error = reason
+			writePaymentRequired(w, paymentRequired, settled)
+			return
+		}
+		settle = settled
+	}
+	if header, err := x402spike.EncodeBase64JSON(settle); err == nil {
+		w.Header().Set("PAYMENT-RESPONSE", header)
+	}
+	consumerID := consumerIDFromWallet(payload.Payload.Authorization.From)
+	fingerprint := hashAPIKey(paymentHeader)
+	inserted, balance, err := store.RecordX402PrepaidTopup(r.Context(), consumerID, fingerprint, req.AmountUSDC)
+	if err != nil {
+		_ = writeJSON(w, http.StatusInternalServerError, openAIError(http.StatusInternalServerError, "failed to record prepaid topup"))
 		return
 	}
 
@@ -568,23 +604,18 @@ func (p *OpenAIProxy) handlePrepaidPay(w http.ResponseWriter, r *http.Request) {
 			_ = writeJSON(w, http.StatusInternalServerError, openAIError(http.StatusInternalServerError, "failed to generate api key"))
 			return
 		}
-		if err := store.UpsertConsumerAPIKey(r.Context(), consumerID, verified.FromWallet, "prepaid", hashAPIKey(newAPIKey)); err != nil {
+		if err := store.UpsertConsumerAPIKey(r.Context(), consumerID, payload.Payload.Authorization.From, "prepaid", hashAPIKey(newAPIKey)); err != nil {
 			_ = writeJSON(w, http.StatusInternalServerError, openAIError(http.StatusInternalServerError, "failed to persist api key"))
 			return
 		}
 	}
-	balance, err := store.CurrentConsumerBalance(r.Context(), consumerID)
-	if err != nil {
-		_ = writeJSON(w, http.StatusInternalServerError, openAIError(http.StatusInternalServerError, "failed to read prepaid balance"))
-		return
-	}
 	resp := map[string]any{
 		"ok":           true,
 		"consumer_id":  consumerID,
-		"wallet":       verified.FromWallet,
-		"amount_usdc":  verified.AmountUSDC,
+		"wallet":       payload.Payload.Authorization.From,
+		"amount_usdc":  req.AmountUSDC,
 		"balance_usdc": balance,
-		"tx_hash":      verified.TxHash,
+		"payment_ref":  fingerprint,
 		"idempotent":   !inserted,
 	}
 	if newAPIKey != "" {
@@ -719,6 +750,17 @@ func (p *OpenAIProxy) requireStrictAPIKey(w http.ResponseWriter, r *http.Request
 func consumerIDFromWallet(wallet string) string {
 	addr := strings.ToLower(strings.TrimSpace(wallet))
 	return "wallet:" + addr
+}
+
+func usdcAmountToAtomicString(amountUSDC float64) (string, error) {
+	if amountUSDC <= 0 {
+		return "", fmt.Errorf("amount_usdc must be > 0")
+	}
+	atomic := int64(math.Round(amountUSDC * 1_000_000))
+	if atomic <= 0 {
+		return "", fmt.Errorf("amount_usdc too small")
+	}
+	return strconv.FormatInt(atomic, 10), nil
 }
 
 func decodeJSONBody(r io.Reader, out any) error {

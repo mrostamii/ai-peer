@@ -99,9 +99,9 @@ func (m *mockControlStore) CurrentConsumerBalance(_ context.Context, _ string) (
 	return m.currentBalance, nil
 }
 
-func (m *mockControlStore) RecordPrepaidDeposit(_ context.Context, _ PrepaidDepositRecord) (bool, error) {
+func (m *mockControlStore) RecordX402PrepaidTopup(_ context.Context, _ string, _ string, _ float64) (bool, float64, error) {
 	m.recordPrepaidCalled = true
-	return m.recordPrepaidInserted, nil
+	return m.recordPrepaidInserted, m.currentBalance, nil
 }
 
 func TestHandleProviderRegisterRequiresControlStore(t *testing.T) {
