@@ -56,3 +56,31 @@ metrics:
 
 gateway:
   listen: "127.0.0.1:8080"
+  # community: local/self-hosted gateway with no official datastore credentials
+  # official: hosted gateway that uses PostgreSQL (Redis hot-path is future)
+  mode: "community"
+  # Required when mode=official. Used for privileged control endpoints.
+  control_api_token: ""
+  # off | optional | required (mainly used for official gateways)
+  auth_mode: "off"
+  telemetry:
+    # Outbound usage telemetry upload (mainly for community gateways).
+    enabled: false
+    endpoint: "https://api.tooti.network/v1/telemetry/usage"
+    signing_key_path: "./data/telemetry_signing.key"
+    batch_max_events: 200
+    flush_interval_sec: 60
+  redis:
+    # Optional. Official mode does not use Redis in the binary yet (PostgreSQL
+    # only). Leave empty until hot-path Redis is implemented.
+    addr: ""
+    password: ""
+    db: 0
+    tls_enabled: false
+    key_prefix: "tooti:"
+  postgres:
+    # Required only when gateway.mode=official
+    dsn: ""
+    max_open_conns: 20
+    max_idle_conns: 10
+    conn_max_lifetime_sec: 300

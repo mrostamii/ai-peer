@@ -47,6 +47,18 @@ models:
 	if cfg.Gateway.Listen != "127.0.0.1:8080" {
 		t.Fatalf("gateway default not applied: %q", cfg.Gateway.Listen)
 	}
+	if cfg.Gateway.Mode != "community" {
+		t.Fatalf("gateway mode default not applied: %q", cfg.Gateway.Mode)
+	}
+	if cfg.Gateway.AuthMode != "off" {
+		t.Fatalf("gateway auth mode default not applied: %q", cfg.Gateway.AuthMode)
+	}
+	if cfg.Gateway.Telemetry.BatchMaxEvents != 200 {
+		t.Fatalf("gateway telemetry batch default not applied: %d", cfg.Gateway.Telemetry.BatchMaxEvents)
+	}
+	if cfg.Gateway.Telemetry.FlushIntervalSec != 60 {
+		t.Fatalf("gateway telemetry flush default not applied: %d", cfg.Gateway.Telemetry.FlushIntervalSec)
+	}
 }
 
 func TestLoadInvalidConfig(t *testing.T) {
@@ -231,5 +243,110 @@ models:
 	}
 	if len(cfg.Models.Advertised) != 0 {
 		t.Fatalf("advertised model count=%d want 0", len(cfg.Models.Advertised))
+	}
+}
+
+func TestLoadOfficialGatewayRequiresControlTokenAndPostgres(t *testing.T) {
+	t.Parallel()
+	d := t.TempDir()
+	p := filepath.Join(d, "official-invalid.yaml")
+	err := os.WriteFile(p, []byte(`node:
+  name: "official-gw"
+listen:
+  tcp_port: 4001
+  quic_port: 4001
+network:
+  bootstrap_peers: []
+backend:
+  type: "ollama"
+  base_url: "http://127.0.0.1:11434"
+models:
+  advertised: []
+gateway:
+  mode: "official"
+`), 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Load(p)
+	if err == nil {
+		t.Fatal("expected official gateway config to fail without datastore settings")
+	}
+	if !strings.Contains(err.Error(), "gateway.control_api_token") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadOfficialGatewayWithDatastores(t *testing.T) {
+	t.Parallel()
+	d := t.TempDir()
+	p := filepath.Join(d, "official-valid.yaml")
+	err := os.WriteFile(p, []byte(`node:
+  name: "official-gw"
+listen:
+  tcp_port: 4001
+  quic_port: 4001
+network:
+  bootstrap_peers: []
+backend:
+  type: "ollama"
+  base_url: "http://127.0.0.1:11434"
+models:
+  advertised: []
+gateway:
+  mode: "official"
+  auth_mode: "required"
+  control_api_token: "dev-official-token"
+  postgres:
+    dsn: "postgres://tooti:tooti@127.0.0.1:5432/tooti?sslmode=disable"
+`), 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Gateway.Mode != "official" {
+		t.Fatalf("mode=%q want official", cfg.Gateway.Mode)
+	}
+	if cfg.Gateway.AuthMode != "required" {
+		t.Fatalf("auth_mode=%q want required", cfg.Gateway.AuthMode)
+	}
+}
+
+func TestLoadTelemetryValidation(t *testing.T) {
+	t.Parallel()
+	d := t.TempDir()
+	p := filepath.Join(d, "telemetry-invalid.yaml")
+	err := os.WriteFile(p, []byte(`node:
+  name: "community-gw"
+listen:
+  tcp_port: 4001
+  quic_port: 4001
+network:
+  bootstrap_peers: []
+backend:
+  type: "ollama"
+  base_url: "http://127.0.0.1:11434"
+models:
+  advertised: []
+gateway:
+  telemetry:
+    enabled: true
+    endpoint: "http://127.0.0.1:8080/v1/telemetry/usage"
+`), 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Load(p)
+	if err == nil {
+		t.Fatal("expected telemetry validation error")
+	}
+	if !strings.Contains(err.Error(), "gateway.telemetry.signing_key_path") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

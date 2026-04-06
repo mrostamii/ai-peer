@@ -24,6 +24,7 @@ import (
 	"github.com/mrostamii/tooti/pkg/apiv1"
 	"github.com/mrostamii/tooti/pkg/backend/ollama"
 	"github.com/mrostamii/tooti/pkg/config"
+	"github.com/mrostamii/tooti/pkg/dataplane"
 	"github.com/mrostamii/tooti/pkg/gateway"
 	"github.com/mrostamii/tooti/pkg/node"
 	"github.com/mrostamii/tooti/pkg/registry"
@@ -36,6 +37,7 @@ func main() {
 		fmt.Println("tooti")
 		fmt.Println("usage: tooti config-check -file ./node.yaml")
 		fmt.Println("usage: tooti pay chat -url http://127.0.0.1:8080/v1/chat/completions -model qwen2.5:3b -message \"say hi\"")
+		fmt.Println("usage: tooti pay topup -gateway http://127.0.0.1:8080 -amount-usdc 5")
 		return
 	}
 
@@ -319,6 +321,88 @@ func runGatewayStart(args []string) {
 	log.Printf("gateway start: listen=%s ollama=%s p2p=tcp/%d quic/%d (health topic %q)",
 		resolvedListen, resolvedOllama, cfg.Listen.TCPPort, cfg.Listen.QUICPort, node.HealthTopicID)
 	proxy := gateway.NewOpenAIProxy(resolvedListen, resolvedOllama, reg)
+	gwID := strings.TrimSpace(cfg.Gateway.ID)
+	if gwID == "" {
+		gwID = resolvedListen
+	}
+	proxy.SetGatewayID(gwID)
+	proxy.SetGatewayMode(cfg.Gateway.Mode)
+	proxy.SetControlAPIToken(cfg.Gateway.ControlAPIToken)
+	proxy.SetAuthMode(cfg.Gateway.AuthMode)
+	resolvedX402PayTo := strings.TrimSpace(*x402PayTo)
+	if resolvedX402PayTo == "" {
+		resolvedX402PayTo = strings.TrimSpace(cfg.Node.X402.PayTo)
+	}
+	modelPricingCfg := cfg.Models.ModelPricing
+	if len(modelPricingCfg) == 0 {
+		// Backward compatibility for older configs.
+		modelPricingCfg = cfg.Gateway.X402.ModelPricing
+	}
+	prepaidModelPricing := make(map[string]gateway.X402TokenPricingConfig, len(modelPricingCfg))
+	for model, mp := range modelPricingCfg {
+		prepaidModelPricing[model] = gateway.X402TokenPricingConfig{
+			AtomicPer1KTokens:   mp.PricePer1KAtomic,
+			MinAmountAtomic:     mp.MinAmountAtomic,
+			MaxAmountAtomic:     mp.MaxAmountAtomic,
+			DefaultOutputTokens: mp.DefaultOutputTokens,
+		}
+	}
+	prepaidTokenPricing := &gateway.X402TokenPricingConfig{
+		AtomicPer1KTokens:   10000, // 0.01 USDC per 1K tokens
+		MinAmountAtomic:     1000,  // 0.001 USDC floor per request
+		DefaultOutputTokens: 256,
+	}
+	if *x402PricePer1K > 0 {
+		prepaidTokenPricing.AtomicPer1KTokens = *x402PricePer1K
+	}
+	if *x402MinAmount > 0 {
+		prepaidTokenPricing.MinAmountAtomic = *x402MinAmount
+	}
+	if *x402DefaultOutputTokens > 0 {
+		prepaidTokenPricing.DefaultOutputTokens = *x402DefaultOutputTokens
+	}
+	proxy.SetPrepaidPricing(prepaidTokenPricing, prepaidModelPricing)
+	if strings.EqualFold(strings.TrimSpace(cfg.Gateway.Mode), "official") {
+		store, err := dataplane.OpenPostgresStore(
+			cfg.Gateway.Postgres.DSN,
+			cfg.Gateway.Postgres.MaxOpenConns,
+			cfg.Gateway.Postgres.MaxIdleConns,
+			cfg.Gateway.Postgres.ConnMaxLifetimeSec,
+		)
+		if err != nil {
+			log.Fatalf("official gateway postgres init failed: %v", err)
+		}
+		defer func() {
+			if err := store.Close(); err != nil {
+				log.Printf("postgres close warning: %v", err)
+			}
+		}()
+		proxy.SetControlStore(store)
+		log.Printf("official gateway control store enabled (postgres)")
+		if resolvedX402PayTo == "" {
+			log.Printf("x402 prepaid topup unavailable: set -x402-payto or node.x402.pay_to")
+		} else {
+			proxy.SetX402PrepaidTopupPaywall(&gateway.X402PaywallConfig{
+				FacilitatorURL: strings.TrimSpace(*x402Facilitator),
+				Requirement: x402spike.PaymentRequirements{
+					Scheme:            "exact",
+					Network:           strings.TrimSpace(*x402Network),
+					Amount:            "1000000",
+					Asset:             strings.TrimSpace(*x402Asset),
+					PayTo:             resolvedX402PayTo,
+					MaxTimeoutSeconds: 60,
+					Extra: map[string]any{
+						"name":    strings.TrimSpace(*x402TokenName),
+						"version": strings.TrimSpace(*x402TokenVersion),
+					},
+				},
+			})
+			log.Printf("x402 prepaid topup enabled network=%s asset=%s payto=%s facilitator=%s",
+				strings.TrimSpace(*x402Network), strings.TrimSpace(*x402Asset), resolvedX402PayTo, strings.TrimSpace(*x402Facilitator))
+		}
+	} else {
+		log.Printf("community gateway mode (control store disabled)")
+	}
 	proxy.SetLocalBackendEnabled(*localBackend)
 	proxy.SetTimeouts(
 		time.Duration(cfg.Timeouts.FirstTokenSec)*time.Second,
@@ -338,7 +422,7 @@ func runGatewayStart(args []string) {
 	}
 
 	if mode == "managed" {
-		if strings.TrimSpace(*x402PayTo) == "" {
+		if resolvedX402PayTo == "" {
 			log.Fatalf("x402 managed mode requires -x402-payto")
 		}
 		paywallCfg := &gateway.X402PaywallConfig{
@@ -348,18 +432,13 @@ func runGatewayStart(args []string) {
 				Network:           strings.TrimSpace(*x402Network),
 				Amount:            strings.TrimSpace(*x402Amount),
 				Asset:             strings.TrimSpace(*x402Asset),
-				PayTo:             strings.TrimSpace(*x402PayTo),
+				PayTo:             resolvedX402PayTo,
 				MaxTimeoutSeconds: 60,
 				Extra: map[string]any{
 					"name":    strings.TrimSpace(*x402TokenName),
 					"version": strings.TrimSpace(*x402TokenVersion),
 				},
 			},
-		}
-		modelPricingCfg := cfg.Models.ModelPricing
-		if len(modelPricingCfg) == 0 {
-			// Backward compatibility for older configs.
-			modelPricingCfg = cfg.Gateway.X402.ModelPricing
 		}
 		if len(modelPricingCfg) > 0 {
 			paywallCfg.ModelPricing = make(map[string]gateway.X402TokenPricingConfig, len(modelPricingCfg))
@@ -384,7 +463,7 @@ func runGatewayStart(args []string) {
 			strings.TrimSpace(*x402Network),
 			strings.TrimSpace(*x402Amount),
 			strings.TrimSpace(*x402Asset),
-			strings.TrimSpace(*x402PayTo),
+			resolvedX402PayTo,
 			strings.TrimSpace(*x402Facilitator),
 			*x402PricePer1K,
 			*x402MinAmount,
@@ -735,11 +814,24 @@ func runNetworkModels(args []string) {
 func runPay(args []string) {
 	if len(args) == 0 {
 		fmt.Println("usage: tooti pay chat -url http://127.0.0.1:8080/v1/chat/completions -model qwen2.5:3b -message \"say hi\"")
+		fmt.Println("usage: tooti pay topup -gateway http://127.0.0.1:8080 -amount-usdc 5")
+		fmt.Println("usage: tooti pay balance -gateway http://127.0.0.1:8080")
+		fmt.Println("usage: tooti pay rotate-key -gateway http://127.0.0.1:8080")
 		os.Exit(2)
+	}
+	if amount, ok := parsePayAmountShortcut(args[0]); ok {
+		runPayTopup(append([]string{"-amount-usdc", fmt.Sprintf("%.6f", amount)}, args[1:]...))
+		return
 	}
 	switch args[0] {
 	case "chat":
 		runPayChat(args[1:])
+	case "topup":
+		runPayTopup(args[1:])
+	case "balance":
+		runPayBalance(args[1:])
+	case "rotate-key":
+		runPayRotateKey(args[1:])
 	default:
 		fmt.Printf("unknown pay command: %s\n", args[0])
 		os.Exit(2)

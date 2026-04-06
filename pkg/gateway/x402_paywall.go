@@ -46,6 +46,15 @@ func (p *OpenAIProxy) SetX402ChatPaywall(cfg *X402PaywallConfig) {
 	p.chatPaywall = cfg
 }
 
+func (p *OpenAIProxy) SetX402PrepaidTopupPaywall(cfg *X402PaywallConfig) {
+	p.prepaidTopupPaywall = cfg
+}
+
+func (p *OpenAIProxy) SetPrepaidPricing(token *X402TokenPricingConfig, models map[string]X402TokenPricingConfig) {
+	p.prepaidTokenPricing = token
+	p.prepaidModelPricing = models
+}
+
 func (p *OpenAIProxy) enforceChatPayment(w http.ResponseWriter, r *http.Request, oreq *openAIChatRequest) bool {
 	if p.chatPaywall == nil {
 		return true
@@ -238,14 +247,19 @@ func (p *OpenAIProxy) resolveTokenPricing(req *openAIChatRequest) X402TokenPrici
 		return X402TokenPricingConfig{}
 	}
 	pricing := *p.chatPaywall.TokenPricing
+	return applyModelPricingOverride(pricing, req, p.chatPaywall.ModelPricing)
+}
+
+func applyModelPricingOverride(base X402TokenPricingConfig, req *openAIChatRequest, modelPricing map[string]X402TokenPricingConfig) X402TokenPricingConfig {
+	pricing := base
 	if req == nil {
 		return pricing
 	}
 	model := strings.TrimSpace(req.Model)
-	if model == "" || len(p.chatPaywall.ModelPricing) == 0 {
+	if model == "" || len(modelPricing) == 0 {
 		return pricing
 	}
-	if m, ok := p.chatPaywall.ModelPricing[model]; ok {
+	if m, ok := modelPricing[model]; ok {
 		if m.AtomicPer1KTokens > 0 {
 			pricing.AtomicPer1KTokens = m.AtomicPer1KTokens
 		}

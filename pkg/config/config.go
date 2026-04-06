@@ -14,6 +14,10 @@ const (
 	defaultFirstTokenSec        = 30
 	defaultTotalRequestSec      = 120
 	defaultGatewayListenAddr    = "127.0.0.1:8080"
+	defaultGatewayMode          = "community"
+	defaultGatewayAuthMode      = "off"
+	defaultTelemetryBatchMax    = 200
+	defaultTelemetryFlushSec    = 60
 	defaultBackendType          = "ollama"
 	defaultBackendBaseURL       = "http://127.0.0.1:11434"
 	defaultX402Network          = "eip155:84532"
@@ -78,7 +82,35 @@ type Config struct {
 
 	Gateway struct {
 		Listen string `yaml:"listen"`
-		X402   struct {
+		// ID identifies this gateway instance in usage_events and telemetry (optional; defaults to listen).
+		ID   string `yaml:"id"`
+		Mode string `yaml:"mode"`
+		// ControlAPIToken authenticates privileged official-gateway control endpoints.
+		ControlAPIToken string `yaml:"control_api_token"`
+		// AuthMode controls API key behavior for hosted gateways.
+		// Allowed: off | optional | required
+		AuthMode  string `yaml:"auth_mode"`
+		Telemetry struct {
+			Enabled          bool   `yaml:"enabled"`
+			Endpoint         string `yaml:"endpoint"`
+			SigningKeyPath   string `yaml:"signing_key_path"`
+			BatchMaxEvents   int    `yaml:"batch_max_events"`
+			FlushIntervalSec int    `yaml:"flush_interval_sec"`
+		} `yaml:"telemetry"`
+		Redis struct {
+			Addr       string `yaml:"addr"`
+			Password   string `yaml:"password"`
+			DB         int    `yaml:"db"`
+			TLSEnabled bool   `yaml:"tls_enabled"`
+			KeyPrefix  string `yaml:"key_prefix"`
+		} `yaml:"redis"`
+		Postgres struct {
+			DSN                string `yaml:"dsn"`
+			MaxOpenConns       int    `yaml:"max_open_conns"`
+			MaxIdleConns       int    `yaml:"max_idle_conns"`
+			ConnMaxLifetimeSec int    `yaml:"conn_max_lifetime_sec"`
+		} `yaml:"postgres"`
+		X402 struct {
 			ModelPricing map[string]X402ModelPricing `yaml:"model_pricing"`
 		} `yaml:"x402"`
 	} `yaml:"gateway"`
@@ -123,6 +155,18 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Gateway.Listen == "" {
 		c.Gateway.Listen = defaultGatewayListenAddr
+	}
+	if c.Gateway.Mode == "" {
+		c.Gateway.Mode = defaultGatewayMode
+	}
+	if c.Gateway.AuthMode == "" {
+		c.Gateway.AuthMode = defaultGatewayAuthMode
+	}
+	if c.Gateway.Telemetry.BatchMaxEvents == 0 {
+		c.Gateway.Telemetry.BatchMaxEvents = defaultTelemetryBatchMax
+	}
+	if c.Gateway.Telemetry.FlushIntervalSec == 0 {
+		c.Gateway.Telemetry.FlushIntervalSec = defaultTelemetryFlushSec
 	}
 	if c.Backend.Type == "" {
 		c.Backend.Type = defaultBackendType
@@ -191,6 +235,55 @@ func (c *Config) Validate() error {
 	}
 	if c.Gateway.Listen == "" {
 		return fmt.Errorf("gateway.listen must not be empty")
+	}
+	switch c.Gateway.Mode {
+	case "official", "community":
+	default:
+		return fmt.Errorf("gateway.mode must be one of: official, community")
+	}
+	switch c.Gateway.AuthMode {
+	case "off", "optional", "required":
+	default:
+		return fmt.Errorf("gateway.auth_mode must be one of: off, optional, required")
+	}
+	if c.Gateway.Telemetry.BatchMaxEvents <= 0 {
+		return fmt.Errorf("gateway.telemetry.batch_max_events must be > 0")
+	}
+	if c.Gateway.Telemetry.FlushIntervalSec <= 0 {
+		return fmt.Errorf("gateway.telemetry.flush_interval_sec must be > 0")
+	}
+	if c.Gateway.Telemetry.Enabled {
+		if c.Gateway.Telemetry.Endpoint == "" {
+			return fmt.Errorf("gateway.telemetry.enabled requires gateway.telemetry.endpoint")
+		}
+		if _, err := url.ParseRequestURI(c.Gateway.Telemetry.Endpoint); err != nil {
+			return fmt.Errorf("gateway.telemetry.endpoint is invalid: %w", err)
+		}
+		if c.Gateway.Telemetry.SigningKeyPath == "" {
+			return fmt.Errorf("gateway.telemetry.enabled requires gateway.telemetry.signing_key_path")
+		}
+	}
+	if c.Gateway.Redis.DB < 0 {
+		return fmt.Errorf("gateway.redis.db must be >= 0")
+	}
+	if c.Gateway.Postgres.MaxOpenConns < 0 {
+		return fmt.Errorf("gateway.postgres.max_open_conns must be >= 0")
+	}
+	if c.Gateway.Postgres.MaxIdleConns < 0 {
+		return fmt.Errorf("gateway.postgres.max_idle_conns must be >= 0")
+	}
+	if c.Gateway.Postgres.ConnMaxLifetimeSec < 0 {
+		return fmt.Errorf("gateway.postgres.conn_max_lifetime_sec must be >= 0")
+	}
+	if c.Gateway.Mode == "official" {
+		if c.Gateway.ControlAPIToken == "" {
+			return fmt.Errorf("gateway.mode=official requires gateway.control_api_token")
+		}
+		if c.Gateway.Postgres.DSN == "" {
+			return fmt.Errorf("gateway.mode=official requires gateway.postgres.dsn")
+		}
+		// Redis is optional: official hot-path cache/Lua scripts are not wired yet.
+		// When gateway.redis.addr is set, future versions will use it; omit until then.
 	}
 	for model, pricing := range c.Models.ModelPricing {
 		if err := validateX402ModelPricing("models.model_pricing", model, pricing); err != nil {
