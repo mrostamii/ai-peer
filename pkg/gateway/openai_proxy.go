@@ -21,6 +21,7 @@ import (
 
 type OpenAIProxy struct {
 	listenAddr          string
+	gatewayID           string
 	ollamaBase          string
 	localBackendEnabled bool
 	gatewayMode         string
@@ -111,6 +112,11 @@ func (p *OpenAIProxy) SetRemoteStreamChatFunc(fn RemoteStreamChatFunc) {
 
 func (p *OpenAIProxy) SetControlStore(store ControlStore) {
 	p.controlStore = store
+}
+
+// SetGatewayID sets the stable id stored on usage rows (defaults to listen address if empty).
+func (p *OpenAIProxy) SetGatewayID(id string) {
+	p.gatewayID = strings.TrimSpace(id)
 }
 
 func (p *OpenAIProxy) SetGatewayMode(mode string) {
@@ -316,15 +322,21 @@ func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if oreq.Stream {
-		p.handleChatCompletionsStream(w, r, &oreq, requestID, prepaidSession)
+		p.handleChatCompletionsStream(w, r, &oreq, requestID, prepaidSession, principal)
 		return
 	}
 	started := time.Now()
 	selectedNode := ""
-	tokensUsed := int64(0)
+	var promptTok, completionTok int64
+	// When >= 0, overrides tokens_used in inference_request logs (remote providers often report one total).
+	inferLogTokens := int64(-1)
 	success := false
 	failure := ""
 	defer func() {
+		tokensUsed := promptTok + completionTok
+		if inferLogTokens >= 0 {
+			tokensUsed = inferLogTokens
+		}
 		p.logRequest(map[string]any{
 			"event":       "inference_request",
 			"request_id":  requestID,
@@ -336,7 +348,8 @@ func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 			"ok":          success,
 			"error":       failure,
 		})
-		p.finalizePrepaidReservation(r.Context(), prepaidSession, &oreq, tokensUsed, success)
+		p.finalizePrepaidReservation(r.Context(), prepaidSession, &oreq, completionTok, success)
+		p.recordOfficialChatUsage(r.Context(), principal, prepaidSession, &oreq, requestID, oreq.Model, promptTok, completionTok, time.Since(started).Milliseconds(), success)
 	}()
 
 	reqCtx, cancel := context.WithTimeout(r.Context(), p.totalRequestTimeout)
@@ -377,7 +390,15 @@ func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 					failure = err.Error()
 					continue
 				}
-				tokensUsed = resp.CompletionTokens
+				promptTok = estimateInputTokens(&oreq)
+				completionTok = resp.CompletionTokens
+				if completionTok < 0 {
+					completionTok = 0
+				}
+				inferLogTokens = resp.CompletionTokens
+				if inferLogTokens < 0 {
+					inferLogTokens = 0
+				}
 				success = true
 				_ = writeJSON(w, http.StatusOK, openAIChatCompletionFromRemote(resp, oreq.Model, requestID))
 				return
@@ -433,18 +454,24 @@ func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	tokensUsed = int64(ochat.PromptEvalCount + ochat.EvalCount)
+	promptTok = int64(ochat.PromptEvalCount)
+	completionTok = int64(ochat.EvalCount)
 	success = true
 	_ = writeJSON(w, http.StatusOK, openAIChatCompletionFromOllama(&ochat, oreq.Model, requestID))
 }
 
-func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http.Request, oreq *openAIChatRequest, requestID string, prepaidSession *prepaidChargeSession) {
+func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http.Request, oreq *openAIChatRequest, requestID string, prepaidSession *prepaidChargeSession, principal *APIKeyPrincipal) {
 	started := time.Now()
 	selectedNode := ""
-	tokensUsed := int64(0)
+	var promptTok, completionTok int64
+	inferLogTokens := int64(-1)
 	success := false
 	failure := ""
 	defer func() {
+		tokensUsed := promptTok + completionTok
+		if inferLogTokens >= 0 {
+			tokensUsed = inferLogTokens
+		}
 		p.logRequest(map[string]any{
 			"event":       "inference_request",
 			"request_id":  requestID,
@@ -456,7 +483,8 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 			"ok":          success,
 			"error":       failure,
 		})
-		p.finalizePrepaidReservation(r.Context(), prepaidSession, oreq, tokensUsed, success)
+		p.finalizePrepaidReservation(r.Context(), prepaidSession, oreq, completionTok, success)
+		p.recordOfficialChatUsage(r.Context(), principal, prepaidSession, oreq, requestID, oreq.Model, promptTok, completionTok, time.Since(started).Milliseconds(), success)
 	}()
 	reqCtx, cancel := context.WithTimeout(r.Context(), p.totalRequestTimeout)
 	defer cancel()
@@ -546,7 +574,12 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 				return
 			}
 			if first.GetDone() {
-				tokensUsed = first.GetTokensUsed()
+				promptTok = estimateInputTokens(oreq)
+				completionTok = first.GetTokensUsed()
+				if completionTok < 0 {
+					completionTok = 0
+				}
+				inferLogTokens = completionTok
 				success = true
 				_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 				flusher.Flush()
@@ -577,7 +610,12 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 				}
 				finishReason := any(nil)
 				if chunk.GetDone() {
-					tokensUsed = chunk.GetTokensUsed()
+					promptTok = estimateInputTokens(oreq)
+					completionTok = chunk.GetTokensUsed()
+					if completionTok < 0 {
+						completionTok = 0
+					}
+					inferLogTokens = completionTok
 					finishReason = "stop"
 				}
 				firstChunk = false
@@ -665,7 +703,8 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 	}
 	firstFinish := any(nil)
 	if first.Done {
-		tokensUsed = int64(first.PromptEvalCount + first.EvalCount)
+		promptTok = int64(first.PromptEvalCount)
+		completionTok = int64(first.EvalCount)
 		firstFinish = "stop"
 	}
 	firstChunk = false
@@ -700,7 +739,8 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 		}
 		finishReason := any(nil)
 		if chunk.Done {
-			tokensUsed = int64(chunk.PromptEvalCount + chunk.EvalCount)
+			promptTok = int64(chunk.PromptEvalCount)
+			completionTok = int64(chunk.EvalCount)
 			finishReason = "stop"
 		}
 		firstChunk = false
@@ -1086,6 +1126,86 @@ func writeJSON(w http.ResponseWriter, status int, v any) error {
 	return err
 }
 
+func (p *OpenAIProxy) officialGatewayID() string {
+	if p == nil {
+		return ""
+	}
+	if s := strings.TrimSpace(p.gatewayID); s != "" {
+		return s
+	}
+	return strings.TrimSpace(p.listenAddr)
+}
+
+// recordOfficialChatUsage persists one row per chat completion attempt for official gateways.
+func (p *OpenAIProxy) recordOfficialChatUsage(
+	parentCtx context.Context,
+	principal *APIKeyPrincipal,
+	prepaid *prepaidChargeSession,
+	req *openAIChatRequest,
+	requestID, model string,
+	promptTok, completionTok int64,
+	latencyMS int64,
+	success bool,
+) {
+	if p == nil || !strings.EqualFold(strings.TrimSpace(p.gatewayMode), "official") || p.controlStore == nil {
+		return
+	}
+	insertCtx, cancel := context.WithTimeout(context.WithoutCancel(parentCtx), 8*time.Second)
+	defer cancel()
+
+	payMethod := "none"
+	switch {
+	case prepaid != nil && prepaid.Enabled:
+		payMethod = "prepaid"
+	case p.chatPaywall != nil:
+		payMethod = "x402"
+	}
+
+	consumerID := ""
+	if principal != nil {
+		consumerID = principal.ConsumerID
+	}
+
+	st := "error"
+	if success {
+		st = "ok"
+	}
+
+	modelName := strings.TrimSpace(model)
+	if modelName == "" && req != nil {
+		modelName = strings.TrimSpace(req.Model)
+	}
+
+	var cost float64
+	if prepaid != nil && prepaid.Enabled && success && req != nil {
+		cost = p.computePrepaidChargeUSDC(req, completionTok)
+	}
+
+	ev := UsageEvent{
+		RequestID:     requestID,
+		GatewayID:     p.officialGatewayID(),
+		GatewayType:   "official",
+		ConsumerID:    consumerID,
+		Model:         modelName,
+		TokensIn:      promptTok,
+		TokensOut:     completionTok,
+		CostUSDC:      cost,
+		LatencyMS:     latencyMS,
+		Status:        st,
+		PaymentMethod: payMethod,
+		CreatedAt:     time.Now().UTC(),
+	}
+
+	if _, err := p.controlStore.InsertUsageEvents(insertCtx, []UsageEvent{ev}); err != nil {
+		p.logRequest(map[string]any{
+			"event":       "usage_event_insert_failed",
+			"request_id":  requestID,
+			"consumer_id": consumerID,
+			"error":       err.Error(),
+		})
+	}
+}
+
 type prepaidChargeSession struct {
 	Enabled      bool
 	ConsumerID   string
@@ -1119,6 +1239,8 @@ func (p *OpenAIProxy) beginPrepaidReservation(w http.ResponseWriter, r *http.Req
 	}, true
 }
 
+// finalizePrepaidReservation settles a prepaid hold; completionTokens must be output tokens only
+// (input is estimated inside computePrepaidChargeUSDC).
 func (p *OpenAIProxy) finalizePrepaidReservation(ctx context.Context, session *prepaidChargeSession, req *openAIChatRequest, completionTokens int64, success bool) {
 	if session == nil || !session.Enabled || p.controlStore == nil {
 		return

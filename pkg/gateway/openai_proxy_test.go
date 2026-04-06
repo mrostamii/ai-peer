@@ -256,6 +256,117 @@ func TestHandleChatCompletionsPrepaidFinalizesReservation(t *testing.T) {
 	}
 }
 
+func TestHandleChatCompletionsOfficialRecordsUsageEvent(t *testing.T) {
+	t.Parallel()
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/chat" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{
+			"model":"llama3.2:latest",
+			"message":{"role":"assistant","content":"hi"},
+			"prompt_eval_count":4,
+			"eval_count":2
+		}`))
+	}))
+	defer ollama.Close()
+
+	store := &mockControlStore{}
+	p := NewOpenAIProxy("127.0.0.1:0", ollama.URL, nil)
+	p.SetGatewayMode("official")
+	p.SetGatewayID("gw-test")
+	p.SetControlStore(store)
+	p.SetAuthMode("optional")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"llama3.2:latest",
+		"messages":[{"role":"user","content":"hello"}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	p.handleChatCompletions(rr, req)
+
+	if rr.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status=%d want %d", rr.Result().StatusCode, http.StatusOK)
+	}
+	if !store.insertUsageEventsCalled {
+		t.Fatal("expected usage event insert for official gateway")
+	}
+	if len(store.usageEvents) != 1 {
+		t.Fatalf("usage events=%d want 1", len(store.usageEvents))
+	}
+	ev := store.usageEvents[0]
+	if ev.RequestID == "" || !strings.HasPrefix(ev.RequestID, "gw-") {
+		t.Fatalf("request_id: %q", ev.RequestID)
+	}
+	if ev.GatewayID != "gw-test" || ev.GatewayType != "official" {
+		t.Fatalf("gateway: id=%q type=%q", ev.GatewayID, ev.GatewayType)
+	}
+	if ev.Model != "llama3.2:latest" || ev.TokensIn != 4 || ev.TokensOut != 2 {
+		t.Fatalf("tokens/model: %+v", ev)
+	}
+	if ev.Status != "ok" || ev.PaymentMethod != "none" {
+		t.Fatalf("status/payment: %+v", ev)
+	}
+}
+
+func TestHandleChatCompletionsOfficialPrepaidUsageIncludesCost(t *testing.T) {
+	t.Parallel()
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"model":"llama3.2:latest",
+			"message":{"role":"assistant","content":"x"},
+			"prompt_eval_count":10,
+			"eval_count":10
+		}`))
+	}))
+	defer ollama.Close()
+
+	store := &mockControlStore{
+		lookupAPIKeyResult: &APIKeyPrincipal{
+			ConsumerID:   "consumer-prepaid",
+			ConsumerType: "prepaid",
+		},
+		reservePrepaidResult: PrepaidReserveResult{
+			Approved:     true,
+			ReservedUSDC: 1.0,
+			BalanceAfter: 5.0,
+		},
+	}
+	p := NewOpenAIProxy("127.0.0.1:0", ollama.URL, nil)
+	p.SetGatewayMode("official")
+	p.SetGatewayID("gw-prepaid")
+	p.SetControlStore(store)
+	p.SetAuthMode("required")
+	p.SetPrepaidPricing(&X402TokenPricingConfig{
+		AtomicPer1KTokens: 1_000_000, // 1 USDC per 1K tokens — makes cost obvious
+		MinAmountAtomic:   1,
+	}, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"llama3.2:latest",
+		"messages":[{"role":"user","content":"hello"}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer toot_api_test")
+	rr := httptest.NewRecorder()
+	p.handleChatCompletions(rr, req)
+
+	if rr.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", rr.Result().StatusCode)
+	}
+	if len(store.usageEvents) != 1 {
+		t.Fatalf("usage events=%d", len(store.usageEvents))
+	}
+	ev := store.usageEvents[0]
+	if ev.ConsumerID != "consumer-prepaid" || ev.PaymentMethod != "prepaid" {
+		t.Fatalf("consumer/payment: %+v", ev)
+	}
+	if ev.CostUSDC <= 0 {
+		t.Fatalf("expected positive cost_usdc, got %v", ev.CostUSDC)
+	}
+}
+
 func TestHandleNetworkNodes(t *testing.T) {
 	t.Parallel()
 	reg := registry.New(time.Minute)

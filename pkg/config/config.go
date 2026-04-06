@@ -82,18 +82,20 @@ type Config struct {
 
 	Gateway struct {
 		Listen string `yaml:"listen"`
-		Mode   string `yaml:"mode"`
+		// ID identifies this gateway instance in usage_events and telemetry (optional; defaults to listen).
+		ID   string `yaml:"id"`
+		Mode string `yaml:"mode"`
 		// ControlAPIToken authenticates privileged official-gateway control endpoints.
 		ControlAPIToken string `yaml:"control_api_token"`
 		// AuthMode controls API key behavior for hosted gateways.
 		// Allowed: off | optional | required
-		AuthMode string `yaml:"auth_mode"`
+		AuthMode  string `yaml:"auth_mode"`
 		Telemetry struct {
-			Enabled         bool   `yaml:"enabled"`
-			Endpoint        string `yaml:"endpoint"`
-			SigningKeyPath  string `yaml:"signing_key_path"`
-			BatchMaxEvents  int    `yaml:"batch_max_events"`
-			FlushIntervalSec int   `yaml:"flush_interval_sec"`
+			Enabled          bool   `yaml:"enabled"`
+			Endpoint         string `yaml:"endpoint"`
+			SigningKeyPath   string `yaml:"signing_key_path"`
+			BatchMaxEvents   int    `yaml:"batch_max_events"`
+			FlushIntervalSec int    `yaml:"flush_interval_sec"`
 		} `yaml:"telemetry"`
 		Redis struct {
 			Addr       string `yaml:"addr"`
@@ -108,7 +110,7 @@ type Config struct {
 			MaxIdleConns       int    `yaml:"max_idle_conns"`
 			ConnMaxLifetimeSec int    `yaml:"conn_max_lifetime_sec"`
 		} `yaml:"postgres"`
-		X402   struct {
+		X402 struct {
 			ModelPricing map[string]X402ModelPricing `yaml:"model_pricing"`
 		} `yaml:"x402"`
 	} `yaml:"gateway"`

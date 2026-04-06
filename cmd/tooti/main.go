@@ -321,6 +321,11 @@ func runGatewayStart(args []string) {
 	log.Printf("gateway start: listen=%s ollama=%s p2p=tcp/%d quic/%d (health topic %q)",
 		resolvedListen, resolvedOllama, cfg.Listen.TCPPort, cfg.Listen.QUICPort, node.HealthTopicID)
 	proxy := gateway.NewOpenAIProxy(resolvedListen, resolvedOllama, reg)
+	gwID := strings.TrimSpace(cfg.Gateway.ID)
+	if gwID == "" {
+		gwID = resolvedListen
+	}
+	proxy.SetGatewayID(gwID)
 	proxy.SetGatewayMode(cfg.Gateway.Mode)
 	proxy.SetControlAPIToken(cfg.Gateway.ControlAPIToken)
 	proxy.SetAuthMode(cfg.Gateway.AuthMode)
