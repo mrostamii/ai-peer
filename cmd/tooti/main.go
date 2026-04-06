@@ -328,6 +328,35 @@ func runGatewayStart(args []string) {
 	if resolvedX402PayTo == "" {
 		resolvedX402PayTo = strings.TrimSpace(cfg.Node.X402.PayTo)
 	}
+	modelPricingCfg := cfg.Models.ModelPricing
+	if len(modelPricingCfg) == 0 {
+		// Backward compatibility for older configs.
+		modelPricingCfg = cfg.Gateway.X402.ModelPricing
+	}
+	prepaidModelPricing := make(map[string]gateway.X402TokenPricingConfig, len(modelPricingCfg))
+	for model, mp := range modelPricingCfg {
+		prepaidModelPricing[model] = gateway.X402TokenPricingConfig{
+			AtomicPer1KTokens:   mp.PricePer1KAtomic,
+			MinAmountAtomic:     mp.MinAmountAtomic,
+			MaxAmountAtomic:     mp.MaxAmountAtomic,
+			DefaultOutputTokens: mp.DefaultOutputTokens,
+		}
+	}
+	prepaidTokenPricing := &gateway.X402TokenPricingConfig{
+		AtomicPer1KTokens:   10000, // 0.01 USDC per 1K tokens
+		MinAmountAtomic:     1000,  // 0.001 USDC floor per request
+		DefaultOutputTokens: 256,
+	}
+	if *x402PricePer1K > 0 {
+		prepaidTokenPricing.AtomicPer1KTokens = *x402PricePer1K
+	}
+	if *x402MinAmount > 0 {
+		prepaidTokenPricing.MinAmountAtomic = *x402MinAmount
+	}
+	if *x402DefaultOutputTokens > 0 {
+		prepaidTokenPricing.DefaultOutputTokens = *x402DefaultOutputTokens
+	}
+	proxy.SetPrepaidPricing(prepaidTokenPricing, prepaidModelPricing)
 	if strings.EqualFold(strings.TrimSpace(cfg.Gateway.Mode), "official") {
 		store, err := dataplane.OpenPostgresStore(
 			cfg.Gateway.Postgres.DSN,
@@ -405,11 +434,6 @@ func runGatewayStart(args []string) {
 					"version": strings.TrimSpace(*x402TokenVersion),
 				},
 			},
-		}
-		modelPricingCfg := cfg.Models.ModelPricing
-		if len(modelPricingCfg) == 0 {
-			// Backward compatibility for older configs.
-			modelPricingCfg = cfg.Gateway.X402.ModelPricing
 		}
 		if len(modelPricingCfg) > 0 {
 			paywallCfg.ModelPricing = make(map[string]gateway.X402TokenPricingConfig, len(modelPricingCfg))

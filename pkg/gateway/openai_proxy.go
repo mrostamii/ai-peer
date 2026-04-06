@@ -35,6 +35,8 @@ type OpenAIProxy struct {
 	totalRequestTimeout time.Duration
 	chatPaywall         *X402PaywallConfig
 	prepaidTopupPaywall *X402PaywallConfig
+	prepaidTokenPricing *X402TokenPricingConfig
+	prepaidModelPricing map[string]X402TokenPricingConfig
 }
 
 const maxRemoteRetries = 2
@@ -1150,7 +1152,7 @@ func (p *OpenAIProxy) estimatePrepaidReserveUSDC(req *openAIChatRequest) float64
 }
 
 func (p *OpenAIProxy) computePrepaidChargeUSDC(req *openAIChatRequest, completionTokens int64) float64 {
-	pricing := p.resolveTokenPricing(req)
+	pricing := p.resolvePrepaidTokenPricing(req)
 	if pricing.AtomicPer1KTokens <= 0 {
 		return 0
 	}
@@ -1173,7 +1175,7 @@ func (p *OpenAIProxy) computePrepaidChargeUSDC(req *openAIChatRequest, completio
 }
 
 func (p *OpenAIProxy) defaultPrepaidOutputTokens(req *openAIChatRequest) int64 {
-	pricing := p.resolveTokenPricing(req)
+	pricing := p.resolvePrepaidTokenPricing(req)
 	out := pricing.DefaultOutputTokens
 	if out <= 0 {
 		out = 256
@@ -1185,6 +1187,16 @@ func (p *OpenAIProxy) defaultPrepaidOutputTokens(req *openAIChatRequest) int64 {
 		}
 	}
 	return out
+}
+
+func (p *OpenAIProxy) resolvePrepaidTokenPricing(req *openAIChatRequest) X402TokenPricingConfig {
+	// Prepaid pricing should not depend on chat x402 mode.
+	if p != nil && p.prepaidTokenPricing != nil {
+		base := *p.prepaidTokenPricing
+		return applyModelPricingOverride(base, req, p.prepaidModelPricing)
+	}
+	// Fallback keeps backward compatibility for existing managed x402 setups.
+	return p.resolveTokenPricing(req)
 }
 
 func (p *OpenAIProxy) enforceAPIKeyAuth(w http.ResponseWriter, r *http.Request) (*APIKeyPrincipal, bool) {
