@@ -36,7 +36,6 @@ type Runtime struct {
 	host               host.Host
 	dht                *dht.IpfsDHT
 	bootstraps         []peer.AddrInfo
-	reconnect          bool
 	startedAt          time.Time
 	metricsSrv         *http.Server
 	inferencePaywall   *x402InferencePaywallConfig
@@ -143,30 +142,11 @@ func resolveNATConfig(cfg *config.Config, bootstrapCount int) natConfig {
 }
 
 func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
-	var bootstraps []peer.AddrInfo
-	var err error
-	var useCustomBootstraps bool
-
-	if cfg.Network.PublicDHT {
-		if len(cfg.Network.BootstrapPeers) > 0 {
-			bootstraps, err = ParseBootstrapPeers(ctx, cfg.Network.BootstrapPeers)
-			if err != nil {
-				return nil, err
-			}
-			useCustomBootstraps = true
-			log.Printf("network.public_dht=true: public IPFS DHT with %d custom bootstrap peer(s)", len(bootstraps))
-		} else {
-			bootstraps = dht.GetDefaultBootstrapPeerAddrInfos()
-			log.Printf("network.public_dht=true: using %d default public IPFS DHT bootstrap peer(s)", len(bootstraps))
-		}
-	} else {
-		bootstraps, err = ParseBootstrapPeers(ctx, cfg.Network.BootstrapPeers)
-		if err != nil {
-			return nil, err
-		}
-		useCustomBootstraps = true
-		log.Printf("private Tooti DHT (prefix %s): %d bootstrap peer(s)", TootiDHTProtocolPrefix, len(bootstraps))
+	bootstraps, err := ParseBootstrapPeers(ctx, cfg.Network.BootstrapPeers)
+	if err != nil {
+		return nil, err
 	}
+	log.Printf("Tooti DHT (prefix %s): %d bootstrap peer(s)", TootiDHTProtocolPrefix, len(bootstraps))
 
 	listenTCP := fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", cfg.Listen.TCPPort)
 	listenQUIC := fmt.Sprintf("/ip4/0.0.0.0/udp/%d/quic-v1", cfg.Listen.QUICPort)
@@ -210,14 +190,11 @@ func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 		return nil, fmt.Errorf("create libp2p host: %w", err)
 	}
 
-	dhtOpts := []dht.Option{
+	kdht, err := dht.New(ctx, h,
 		dht.Mode(dhtMode),
 		dht.BootstrapPeers(bootstraps...),
-	}
-	if !cfg.Network.PublicDHT {
-		dhtOpts = append(dhtOpts, dht.ProtocolPrefix(protocol.ID(TootiDHTProtocolPrefix)))
-	}
-	kdht, err := dht.New(ctx, h, dhtOpts...)
+		dht.ProtocolPrefix(protocol.ID(TootiDHTProtocolPrefix)),
+	)
 	if err != nil {
 		_ = h.Close()
 		return nil, fmt.Errorf("create dht: %w", err)
@@ -233,7 +210,6 @@ func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 		host:               h,
 		dht:                kdht,
 		bootstraps:         bootstraps,
-		reconnect:          useCustomBootstraps,
 		startedAt:          time.Now(),
 		paymentDebtByPayer: make(map[string]int64),
 		pendingPayByKey:    make(map[string]pendingInferenceResult),
@@ -262,11 +238,7 @@ func Start(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 	r.inferencePaywall = buildInferencePaywallConfig(cfg)
 	r.logDialAddrs()
 
-	if r.reconnect {
-		go r.bootstrapReconnectLoop(ctx)
-	} else {
-		log.Printf("default DHT bootstrap mode: reconnect loop disabled")
-	}
+	go r.bootstrapReconnectLoop(ctx)
 	if cfg.Metrics.Enabled {
 		metricsSrv, err := startMetricsServer(ctx, cfg.Metrics.Listen)
 		if err != nil {

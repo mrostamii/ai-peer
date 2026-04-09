@@ -54,7 +54,7 @@ flowchart LR
 
 ## Network bootstrap
 
-For the private DHT, configure `network.bootstrap_peers` (e.g. `/dnsaddr/discover.tooti.network` to expand peer ids from TXT, or a full `/ip4/.../p2p/...`).
+Configure `network.bootstrap_peers` (e.g. `/dnsaddr/discover.tooti.network` to expand peer ids from TXT, or a full `/ip4/.../p2p/...`).
 
 ## Quick start
 
