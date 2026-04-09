@@ -41,6 +41,8 @@ type Runtime struct {
 	pendingPayByKey    map[string]pendingInferenceResult
 	peerLogMu          sync.Mutex
 	peerLogged         map[string]struct{}
+	peerConnMu         sync.Mutex
+	peerConnCount      map[peer.ID]int
 
 	inflightInference atomic.Int64
 	statsMu           sync.RWMutex
@@ -58,20 +60,35 @@ type natConfig struct {
 	AutoRelayEnabled    bool
 }
 
-type peerLifecycleLogger struct{}
+func (r *Runtime) Listen(network.Network, ma.Multiaddr)      {}
+func (r *Runtime) ListenClose(network.Network, ma.Multiaddr) {}
+func (r *Runtime) OpenedStream(network.Network, network.Stream) {
+}
+func (r *Runtime) ClosedStream(network.Network, network.Stream) {
+}
+func (r *Runtime) Connected(_ network.Network, c network.Conn) {
+	r.peerConnMu.Lock()
+	defer r.peerConnMu.Unlock()
 
-func (peerLifecycleLogger) Listen(network.Network, ma.Multiaddr)      {}
-func (peerLifecycleLogger) ListenClose(network.Network, ma.Multiaddr) {}
-func (peerLifecycleLogger) OpenedStream(network.Network, network.Stream) {
+	id := c.RemotePeer()
+	prev := r.peerConnCount[id]
+	r.peerConnCount[id] = prev + 1
+	if prev == 0 {
+		log.Printf("peer connected: peer=%s remote_addr=%s", id, c.RemoteMultiaddr())
+	}
 }
-func (peerLifecycleLogger) ClosedStream(network.Network, network.Stream) {
-}
-func (peerLifecycleLogger) Connected(_ network.Network, c network.Conn) {
-	log.Printf("peer connected: peer=%s remote_addr=%s", c.RemotePeer(), c.RemoteMultiaddr())
-}
-func (peerLifecycleLogger) Disconnected(n network.Network, c network.Conn) {
-	remaining := len(n.ConnsToPeer(c.RemotePeer()))
-	log.Printf("peer disconnected: peer=%s remote_addr=%s remaining_conns=%d", c.RemotePeer(), c.RemoteMultiaddr(), remaining)
+func (r *Runtime) Disconnected(_ network.Network, c network.Conn) {
+	r.peerConnMu.Lock()
+	defer r.peerConnMu.Unlock()
+
+	id := c.RemotePeer()
+	prev := r.peerConnCount[id]
+	if prev <= 1 {
+		delete(r.peerConnCount, id)
+		log.Printf("peer disconnected: peer=%s remote_addr=%s", id, c.RemoteMultiaddr())
+		return
+	}
+	r.peerConnCount[id] = prev - 1
 }
 
 func resolveNATConfig(cfg *config.Config, bootstrapCount int) natConfig {
@@ -164,8 +181,9 @@ func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 		paymentDebtByPayer: make(map[string]int64),
 		pendingPayByKey:    make(map[string]pendingInferenceResult),
 		peerLogged:         make(map[string]struct{}),
+		peerConnCount:      make(map[peer.ID]int),
 	}
-	h.Network().Notify(peerLifecycleLogger{})
+	h.Network().Notify(r)
 	log.Printf("network nat: traversal=%t auto_relay=%t relay_service=%t bootstrap_candidates=%d",
 		natCfg.TraversalEnabled, natCfg.AutoRelayEnabled, natCfg.RelayServiceEnabled, len(bootstraps))
 	return r, nil
