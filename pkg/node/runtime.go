@@ -39,6 +39,13 @@ type Runtime struct {
 	paymentDebtByPayer map[string]int64
 	pendingPayMu       sync.Mutex
 	pendingPayByKey    map[string]pendingInferenceResult
+	peerLogMu          sync.Mutex
+	peerLogged         map[string]struct{}
+	peerConnMu         sync.Mutex
+	peerConnCount      map[peer.ID]int
+	peerLastGone       map[peer.ID]time.Time
+	peerDisconTmr      map[peer.ID]*time.Timer
+	bootstrapPeerIDs   map[peer.ID]struct{}
 
 	inflightInference atomic.Int64
 	statsMu           sync.RWMutex
@@ -54,6 +61,71 @@ type natConfig struct {
 	TraversalEnabled    bool
 	RelayServiceEnabled bool
 	AutoRelayEnabled    bool
+}
+
+const peerLogDebounce = 10 * time.Second
+
+func (r *Runtime) Listen(network.Network, ma.Multiaddr)         {}
+func (r *Runtime) ListenClose(network.Network, ma.Multiaddr)    {}
+func (r *Runtime) OpenedStream(network.Network, network.Stream) {}
+func (r *Runtime) ClosedStream(network.Network, network.Stream) {}
+
+func (r *Runtime) Connected(_ network.Network, c network.Conn) {
+	r.peerConnMu.Lock()
+	defer r.peerConnMu.Unlock()
+
+	id := c.RemotePeer()
+	prev := r.peerConnCount[id]
+	r.peerConnCount[id] = prev + 1
+
+	if t, ok := r.peerDisconTmr[id]; ok {
+		t.Stop()
+		delete(r.peerDisconTmr, id)
+	}
+
+	if prev == 0 {
+		lastGone, wasGone := r.peerLastGone[id]
+		delete(r.peerLastGone, id)
+		if (!wasGone || time.Since(lastGone) >= peerLogDebounce) && r.shouldLogPeerLifecycle(id) {
+			log.Printf("peer connected: peer=%s", formatPeerEndpoint(id, c.RemoteMultiaddr()))
+		}
+	}
+}
+
+func (r *Runtime) Disconnected(_ network.Network, c network.Conn) {
+	r.peerConnMu.Lock()
+	defer r.peerConnMu.Unlock()
+
+	id := c.RemotePeer()
+	prev := r.peerConnCount[id]
+	if prev <= 1 {
+		delete(r.peerConnCount, id)
+		r.peerLastGone[id] = time.Now()
+		addr := c.RemoteMultiaddr().String()
+		r.peerDisconTmr[id] = time.AfterFunc(peerLogDebounce, func() {
+			r.peerConnMu.Lock()
+			defer r.peerConnMu.Unlock()
+			if r.peerConnCount[id] > 0 {
+				return
+			}
+			delete(r.peerDisconTmr, id)
+			if r.shouldLogPeerLifecycle(id) {
+				log.Printf("peer disconnected: peer=%s", formatPeerEndpoint(id, ma.StringCast(addr)))
+			}
+		})
+		return
+	}
+	r.peerConnCount[id] = prev - 1
+}
+
+func (r *Runtime) shouldLogPeerLifecycle(id peer.ID) bool {
+	if _, ok := r.bootstrapPeerIDs[id]; ok {
+		return true
+	}
+	r.peerLogMu.Lock()
+	defer r.peerLogMu.Unlock()
+	_, ok := r.peerLogged[id.String()]
+	return ok
 }
 
 func resolveNATConfig(cfg *config.Config, bootstrapCount int) natConfig {
@@ -145,7 +217,18 @@ func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 		startedAt:          time.Now(),
 		paymentDebtByPayer: make(map[string]int64),
 		pendingPayByKey:    make(map[string]pendingInferenceResult),
+		peerLogged:         make(map[string]struct{}),
+		peerConnCount:      make(map[peer.ID]int),
+		peerLastGone:       make(map[peer.ID]time.Time),
+		peerDisconTmr:      make(map[peer.ID]*time.Timer),
+		bootstrapPeerIDs:   make(map[peer.ID]struct{}),
 	}
+	for _, b := range bootstraps {
+		if b.ID != "" {
+			r.bootstrapPeerIDs[b.ID] = struct{}{}
+		}
+	}
+	h.Network().Notify(r)
 	log.Printf("network nat: traversal=%t auto_relay=%t relay_service=%t bootstrap_candidates=%d",
 		natCfg.TraversalEnabled, natCfg.AutoRelayEnabled, natCfg.RelayServiceEnabled, len(bootstraps))
 	return r, nil
@@ -264,12 +347,42 @@ func (r *Runtime) connectBootstraps(ctx context.Context, logErrors bool) {
 		cancel()
 		if err != nil {
 			if logErrors {
-				log.Printf("bootstrap reconnect warning: peer=%s err=%v", b.ID, err)
+				log.Printf("bootstrap reconnect warning: peer=%v err=%v", formatPeerAddrInfo(b), err)
 			}
 			continue
 		}
-		log.Printf("bootstrap connected: peer=%s", b.ID)
+		log.Printf("bootstrap connected: peer=%v", formatPeerAddrInfo(b))
 	}
+}
+
+func formatPeerEndpoint(id peer.ID, addr ma.Multiaddr) string {
+	if addr == nil {
+		return fmt.Sprintf("/p2p/%s", id)
+	}
+	p2pAddrs, err := peer.AddrInfoToP2pAddrs(&peer.AddrInfo{
+		ID:    id,
+		Addrs: []ma.Multiaddr{addr},
+	})
+	if err != nil || len(p2pAddrs) == 0 {
+		return fmt.Sprintf("%s/p2p/%s", strings.TrimSuffix(addr.String(), "/"), id)
+	}
+	return p2pAddrs[0].String()
+}
+
+func formatPeerAddrInfo(info peer.AddrInfo) []string {
+	p2pAddrs, err := peer.AddrInfoToP2pAddrs(&info)
+	if err != nil || len(p2pAddrs) == 0 {
+		out := make([]string, 0, len(info.Addrs))
+		for _, a := range info.Addrs {
+			out = append(out, formatPeerEndpoint(info.ID, a))
+		}
+		return out
+	}
+	out := make([]string, 0, len(p2pAddrs))
+	for _, a := range p2pAddrs {
+		out = append(out, a.String())
+	}
+	return out
 }
 
 func ParseBootstrapPeers(raw []string) ([]peer.AddrInfo, error) {

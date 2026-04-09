@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -396,12 +397,108 @@ func (r *Runtime) InferRemoteStream(ctx context.Context, target peer.ID, req *ap
 }
 
 func logInferenceEvent(fields map[string]any) {
-	raw, err := json.Marshal(sanitizeInferenceLogFields(fields))
-	if err != nil {
-		log.Printf("inference log marshal warning: %v", err)
+	line := formatOrderedInferenceLogLine(orderInferenceLogFields(sanitizeInferenceLogFields(fields)))
+	if strings.TrimSpace(line) == "" {
 		return
 	}
-	log.Print(string(raw))
+	log.Print(line)
+}
+
+func orderInferenceLogFields(fields map[string]any) [][2]any {
+	if len(fields) == 0 {
+		return nil
+	}
+	priority := []string{
+		"event",
+		"request_id",
+		"model",
+		"remote_peer",
+		"stream",
+		"ok",
+		"latency_ms",
+		"ttft_ms",
+		"tokens_used",
+		"error",
+	}
+	out := make([][2]any, 0, len(fields))
+	used := make(map[string]struct{}, len(fields))
+	for _, key := range priority {
+		v, ok := fields[key]
+		if !ok || shouldOmitInferenceLogField(key, v) {
+			continue
+		}
+		out = append(out, [2]any{key, v})
+		used[key] = struct{}{}
+	}
+	extras := make([]string, 0, len(fields))
+	for key := range fields {
+		if _, ok := used[key]; ok {
+			continue
+		}
+		if shouldOmitInferenceLogField(key, fields[key]) {
+			continue
+		}
+		extras = append(extras, key)
+	}
+	sort.Strings(extras)
+	for _, key := range extras {
+		out = append(out, [2]any{key, fields[key]})
+	}
+	return out
+}
+
+func formatOrderedInferenceLogLine(fields [][2]any) string {
+	if len(fields) == 0 {
+		return ""
+	}
+	eventName := "inference_event"
+	start := 0
+	if k, ok := fields[0][0].(string); ok && k == "event" {
+		if v, ok := fields[0][1].(string); ok && strings.TrimSpace(v) != "" {
+			eventName = v
+		}
+		start = 1
+	}
+
+	var b strings.Builder
+	b.WriteString(eventName)
+	for i := start; i < len(fields); i++ {
+		key, ok := fields[i][0].(string)
+		if !ok || key == "event" {
+			continue
+		}
+		b.WriteByte(' ')
+		b.WriteString(key)
+		b.WriteByte('=')
+		b.WriteString(formatInferenceLogValue(fields[i][1]))
+	}
+	return b.String()
+}
+
+func formatInferenceLogValue(v any) string {
+	switch t := v.(type) {
+	case string:
+		if strings.ContainsAny(t, " \t\n\"") {
+			return strconv.Quote(t)
+		}
+		return t
+	case []string:
+		return "[" + strings.Join(t, ",") + "]"
+	default:
+		raw, err := json.Marshal(t)
+		if err != nil {
+			return fmt.Sprintf("%v", t)
+		}
+		return string(raw)
+	}
+}
+
+func shouldOmitInferenceLogField(key string, v any) bool {
+	if key == "error" {
+		s, ok := v.(string)
+		return ok && strings.TrimSpace(s) == ""
+	}
+	return false
 }
 
 func sanitizeInferenceLogFields(fields map[string]any) map[string]any {

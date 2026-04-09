@@ -2,10 +2,14 @@ package node
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
+	"strings"
 
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
+	"github.com/libp2p/go-libp2p/core/peer"
 
 	"github.com/mrostamii/tooti/pkg/config"
 )
@@ -45,10 +49,12 @@ func StartObserving(ctx context.Context, cfg *config.Config, onHealth func([]byt
 		return nil, fmt.Errorf("subscribe health topic: %w", err)
 	}
 	go r.healthSubscribeLoop(ctx, sub, onHealth)
-	// Seed routing table quickly when using default DHT bootstraps (no reconnect loop).
-	go func() {
-		r.ConnectBootstrapsOnce(ctx)
-	}()
+	// Seed routing table quickly only when reconnect loop is disabled.
+	if !r.reconnect {
+		go func() {
+			r.ConnectBootstrapsOnce(ctx)
+		}()
+	}
 	return r, nil
 }
 
@@ -70,8 +76,84 @@ func (r *Runtime) healthSubscribeLoop(ctx context.Context, sub *pubsub.Subscript
 		if len(data) == 0 {
 			continue
 		}
+		r.logNewPeerFromHealth(msg.GetFrom().String(), data)
 		if err := onHealth(data); err != nil {
 			log.Printf("health subscribe: apply payload: %v", err)
 		}
 	}
+}
+
+func (r *Runtime) logNewPeerFromHealth(fromPeerID string, payload []byte) {
+	if strings.TrimSpace(fromPeerID) == "" {
+		return
+	}
+	r.peerLogMu.Lock()
+	if _, ok := r.peerLogged[fromPeerID]; ok {
+		r.peerLogMu.Unlock()
+		return
+	}
+	r.peerLogged[fromPeerID] = struct{}{}
+	r.peerLogMu.Unlock()
+
+	var health HealthUpdate
+	if err := json.Unmarshal(payload, &health); err != nil {
+		log.Printf("network peer established: peer=%v models=[] pricing=[] decode_error=%q",
+			r.peerAddrStrings(fromPeerID),
+			err.Error(),
+		)
+		return
+	}
+
+	models := append([]string(nil), health.Models...)
+	sort.Strings(models)
+	pricing := formatModelPricingForLog(health.ModelPricing)
+	log.Printf("network peer established: peer=%v models=%v pricing=%v",
+		r.peerAddrStrings(fromPeerID),
+		models,
+		pricing,
+	)
+}
+
+func (r *Runtime) peerAddrStrings(peerID string) []string {
+	id, err := peer.Decode(peerID)
+	if err != nil {
+		return nil
+	}
+	p2pAddrs, err := peer.AddrInfoToP2pAddrs(&peer.AddrInfo{
+		ID:    id,
+		Addrs: r.host.Peerstore().Addrs(id),
+	})
+	if err != nil || len(p2pAddrs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(p2pAddrs))
+	for _, addr := range p2pAddrs {
+		out = append(out, addr.String())
+	}
+	sort.Strings(out)
+	return out
+}
+
+func formatModelPricingForLog(pricing map[string]ModelPricingHint) []string {
+	if len(pricing) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(pricing))
+	for model := range pricing {
+		keys = append(keys, model)
+	}
+	sort.Strings(keys)
+
+	out := make([]string, 0, len(keys))
+	for _, model := range keys {
+		p := pricing[model]
+		out = append(out, fmt.Sprintf("%s:price_per_1k_atomic=%d,min_amount_atomic=%d,max_amount_atomic=%d,default_output_tokens=%d",
+			model,
+			p.PricePer1KAtomic,
+			p.MinAmountAtomic,
+			p.MaxAmountAtomic,
+			p.DefaultOutputTokens,
+		))
+	}
+	return out
 }
