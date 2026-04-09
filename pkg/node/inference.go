@@ -397,12 +397,11 @@ func (r *Runtime) InferRemoteStream(ctx context.Context, target peer.ID, req *ap
 }
 
 func logInferenceEvent(fields map[string]any) {
-	raw, err := marshalOrderedLogFields(orderInferenceLogFields(sanitizeInferenceLogFields(fields)))
-	if err != nil {
-		log.Printf("inference log marshal warning: %v", err)
+	line := formatOrderedInferenceLogLine(orderInferenceLogFields(sanitizeInferenceLogFields(fields)))
+	if strings.TrimSpace(line) == "" {
 		return
 	}
-	log.Print(string(raw))
+	log.Print(line)
 }
 
 func orderInferenceLogFields(fields map[string]any) [][2]any {
@@ -448,34 +447,50 @@ func orderInferenceLogFields(fields map[string]any) [][2]any {
 	return out
 }
 
-func marshalOrderedLogFields(fields [][2]any) ([]byte, error) {
+func formatOrderedInferenceLogLine(fields [][2]any) string {
 	if len(fields) == 0 {
-		return []byte("{}"), nil
+		return ""
 	}
+	eventName := "inference_event"
+	start := 0
+	if k, ok := fields[0][0].(string); ok && k == "event" {
+		if v, ok := fields[0][1].(string); ok && strings.TrimSpace(v) != "" {
+			eventName = v
+		}
+		start = 1
+	}
+
 	var b strings.Builder
-	b.WriteByte('{')
-	for i, kv := range fields {
-		key, ok := kv[0].(string)
-		if !ok {
-			return nil, fmt.Errorf("log field key must be string")
+	b.WriteString(eventName)
+	for i := start; i < len(fields); i++ {
+		key, ok := fields[i][0].(string)
+		if !ok || key == "event" {
+			continue
 		}
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		keyRaw, err := json.Marshal(key)
-		if err != nil {
-			return nil, err
-		}
-		valRaw, err := json.Marshal(kv[1])
-		if err != nil {
-			return nil, err
-		}
-		b.Write(keyRaw)
-		b.WriteByte(':')
-		b.Write(valRaw)
+		b.WriteByte(' ')
+		b.WriteString(key)
+		b.WriteByte('=')
+		b.WriteString(formatInferenceLogValue(fields[i][1]))
 	}
-	b.WriteByte('}')
-	return []byte(b.String()), nil
+	return b.String()
+}
+
+func formatInferenceLogValue(v any) string {
+	switch t := v.(type) {
+	case string:
+		if strings.ContainsAny(t, " \t\n\"") {
+			return strconv.Quote(t)
+		}
+		return t
+	case []string:
+		return "[" + strings.Join(t, ",") + "]"
+	default:
+		raw, err := json.Marshal(t)
+		if err != nil {
+			return fmt.Sprintf("%v", t)
+		}
+		return string(raw)
+	}
 }
 
 func shouldOmitInferenceLogField(key string, v any) bool {

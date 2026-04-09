@@ -49,10 +49,12 @@ func StartObserving(ctx context.Context, cfg *config.Config, onHealth func([]byt
 		return nil, fmt.Errorf("subscribe health topic: %w", err)
 	}
 	go r.healthSubscribeLoop(ctx, sub, onHealth)
-	// Seed routing table quickly when using default DHT bootstraps (no reconnect loop).
-	go func() {
-		r.ConnectBootstrapsOnce(ctx)
-	}()
+	// Seed routing table quickly only when reconnect loop is disabled.
+	if !r.reconnect {
+		go func() {
+			r.ConnectBootstrapsOnce(ctx)
+		}()
+	}
 	return r, nil
 }
 

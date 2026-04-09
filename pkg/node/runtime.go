@@ -58,6 +58,22 @@ type natConfig struct {
 	AutoRelayEnabled    bool
 }
 
+type peerLifecycleLogger struct{}
+
+func (peerLifecycleLogger) Listen(network.Network, ma.Multiaddr)      {}
+func (peerLifecycleLogger) ListenClose(network.Network, ma.Multiaddr) {}
+func (peerLifecycleLogger) OpenedStream(network.Network, network.Stream) {
+}
+func (peerLifecycleLogger) ClosedStream(network.Network, network.Stream) {
+}
+func (peerLifecycleLogger) Connected(_ network.Network, c network.Conn) {
+	log.Printf("peer connected: peer=%s remote_addr=%s", c.RemotePeer(), c.RemoteMultiaddr())
+}
+func (peerLifecycleLogger) Disconnected(n network.Network, c network.Conn) {
+	remaining := len(n.ConnsToPeer(c.RemotePeer()))
+	log.Printf("peer disconnected: peer=%s remote_addr=%s remaining_conns=%d", c.RemotePeer(), c.RemoteMultiaddr(), remaining)
+}
+
 func resolveNATConfig(cfg *config.Config, bootstrapCount int) natConfig {
 	traversal := !cfg.Network.DisableNATTraversal
 	return natConfig{
@@ -149,6 +165,7 @@ func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 		pendingPayByKey:    make(map[string]pendingInferenceResult),
 		peerLogged:         make(map[string]struct{}),
 	}
+	h.Network().Notify(peerLifecycleLogger{})
 	log.Printf("network nat: traversal=%t auto_relay=%t relay_service=%t bootstrap_candidates=%d",
 		natCfg.TraversalEnabled, natCfg.AutoRelayEnabled, natCfg.RelayServiceEnabled, len(bootstraps))
 	return r, nil

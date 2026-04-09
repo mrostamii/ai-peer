@@ -50,14 +50,14 @@ func TestLogInferenceEventOrdersFieldsAndOmitsEmptyError(t *testing.T) {
 	})
 
 	out := logs.String()
-	if strings.Contains(out, `"error":""`) {
+	if strings.Contains(out, " error=") {
 		t.Fatalf("expected empty error field to be omitted, got: %s", out)
 	}
 
-	eventIdx := strings.Index(out, `"event":"inference_server_complete"`)
-	reqIdx := strings.Index(out, `"request_id":"gw-1"`)
-	modelIdx := strings.Index(out, `"model":"qwen2.5-coder:7b"`)
-	peerIdx := strings.Index(out, `"remote_peer":"12D3KooX"`)
+	eventIdx := strings.Index(out, "inference_server_complete")
+	reqIdx := strings.Index(out, "request_id=gw-1")
+	modelIdx := strings.Index(out, "model=qwen2.5-coder:7b")
+	peerIdx := strings.Index(out, "remote_peer=12D3KooX")
 	if eventIdx < 0 || reqIdx < 0 || modelIdx < 0 || peerIdx < 0 {
 		t.Fatalf("expected ordered keys in log output, got: %s", out)
 	}
