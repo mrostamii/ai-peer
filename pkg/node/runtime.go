@@ -43,6 +43,8 @@ type Runtime struct {
 	peerLogged         map[string]struct{}
 	peerConnMu         sync.Mutex
 	peerConnCount      map[peer.ID]int
+	peerLastGone       map[peer.ID]time.Time
+	peerDisconTmr      map[peer.ID]*time.Timer
 
 	inflightInference atomic.Int64
 	statsMu           sync.RWMutex
@@ -60,12 +62,13 @@ type natConfig struct {
 	AutoRelayEnabled    bool
 }
 
-func (r *Runtime) Listen(network.Network, ma.Multiaddr)      {}
-func (r *Runtime) ListenClose(network.Network, ma.Multiaddr) {}
-func (r *Runtime) OpenedStream(network.Network, network.Stream) {
-}
-func (r *Runtime) ClosedStream(network.Network, network.Stream) {
-}
+const peerLogDebounce = 10 * time.Second
+
+func (r *Runtime) Listen(network.Network, ma.Multiaddr)         {}
+func (r *Runtime) ListenClose(network.Network, ma.Multiaddr)    {}
+func (r *Runtime) OpenedStream(network.Network, network.Stream) {}
+func (r *Runtime) ClosedStream(network.Network, network.Stream) {}
+
 func (r *Runtime) Connected(_ network.Network, c network.Conn) {
 	r.peerConnMu.Lock()
 	defer r.peerConnMu.Unlock()
@@ -73,10 +76,21 @@ func (r *Runtime) Connected(_ network.Network, c network.Conn) {
 	id := c.RemotePeer()
 	prev := r.peerConnCount[id]
 	r.peerConnCount[id] = prev + 1
+
+	if t, ok := r.peerDisconTmr[id]; ok {
+		t.Stop()
+		delete(r.peerDisconTmr, id)
+	}
+
 	if prev == 0 {
-		log.Printf("peer connected: peer=%s remote_addr=%s", id, c.RemoteMultiaddr())
+		lastGone, wasGone := r.peerLastGone[id]
+		delete(r.peerLastGone, id)
+		if !wasGone || time.Since(lastGone) >= peerLogDebounce {
+			log.Printf("peer connected: peer=%s addr=%s", id, c.RemoteMultiaddr())
+		}
 	}
 }
+
 func (r *Runtime) Disconnected(_ network.Network, c network.Conn) {
 	r.peerConnMu.Lock()
 	defer r.peerConnMu.Unlock()
@@ -85,7 +99,17 @@ func (r *Runtime) Disconnected(_ network.Network, c network.Conn) {
 	prev := r.peerConnCount[id]
 	if prev <= 1 {
 		delete(r.peerConnCount, id)
-		log.Printf("peer disconnected: peer=%s remote_addr=%s", id, c.RemoteMultiaddr())
+		r.peerLastGone[id] = time.Now()
+		addr := c.RemoteMultiaddr().String()
+		r.peerDisconTmr[id] = time.AfterFunc(peerLogDebounce, func() {
+			r.peerConnMu.Lock()
+			defer r.peerConnMu.Unlock()
+			if r.peerConnCount[id] > 0 {
+				return
+			}
+			delete(r.peerDisconTmr, id)
+			log.Printf("peer disconnected: peer=%s addr=%s", id, addr)
+		})
 		return
 	}
 	r.peerConnCount[id] = prev - 1
@@ -182,6 +206,8 @@ func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 		pendingPayByKey:    make(map[string]pendingInferenceResult),
 		peerLogged:         make(map[string]struct{}),
 		peerConnCount:      make(map[peer.ID]int),
+		peerLastGone:       make(map[peer.ID]time.Time),
+		peerDisconTmr:      make(map[peer.ID]*time.Timer),
 	}
 	h.Network().Notify(r)
 	log.Printf("network nat: traversal=%t auto_relay=%t relay_service=%t bootstrap_candidates=%d",
