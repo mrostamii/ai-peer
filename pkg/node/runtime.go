@@ -39,6 +39,8 @@ type Runtime struct {
 	paymentDebtByPayer map[string]int64
 	pendingPayMu       sync.Mutex
 	pendingPayByKey    map[string]pendingInferenceResult
+	peerLogMu          sync.Mutex
+	peerLogged         map[string]struct{}
 
 	inflightInference atomic.Int64
 	statsMu           sync.RWMutex
@@ -145,6 +147,7 @@ func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 		startedAt:          time.Now(),
 		paymentDebtByPayer: make(map[string]int64),
 		pendingPayByKey:    make(map[string]pendingInferenceResult),
+		peerLogged:         make(map[string]struct{}),
 	}
 	log.Printf("network nat: traversal=%t auto_relay=%t relay_service=%t bootstrap_candidates=%d",
 		natCfg.TraversalEnabled, natCfg.AutoRelayEnabled, natCfg.RelayServiceEnabled, len(bootstraps))

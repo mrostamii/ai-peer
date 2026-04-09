@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -396,12 +397,93 @@ func (r *Runtime) InferRemoteStream(ctx context.Context, target peer.ID, req *ap
 }
 
 func logInferenceEvent(fields map[string]any) {
-	raw, err := json.Marshal(sanitizeInferenceLogFields(fields))
+	raw, err := marshalOrderedLogFields(orderInferenceLogFields(sanitizeInferenceLogFields(fields)))
 	if err != nil {
 		log.Printf("inference log marshal warning: %v", err)
 		return
 	}
 	log.Print(string(raw))
+}
+
+func orderInferenceLogFields(fields map[string]any) [][2]any {
+	if len(fields) == 0 {
+		return nil
+	}
+	priority := []string{
+		"event",
+		"request_id",
+		"model",
+		"remote_peer",
+		"stream",
+		"ok",
+		"latency_ms",
+		"ttft_ms",
+		"tokens_used",
+		"error",
+	}
+	out := make([][2]any, 0, len(fields))
+	used := make(map[string]struct{}, len(fields))
+	for _, key := range priority {
+		v, ok := fields[key]
+		if !ok || shouldOmitInferenceLogField(key, v) {
+			continue
+		}
+		out = append(out, [2]any{key, v})
+		used[key] = struct{}{}
+	}
+	extras := make([]string, 0, len(fields))
+	for key := range fields {
+		if _, ok := used[key]; ok {
+			continue
+		}
+		if shouldOmitInferenceLogField(key, fields[key]) {
+			continue
+		}
+		extras = append(extras, key)
+	}
+	sort.Strings(extras)
+	for _, key := range extras {
+		out = append(out, [2]any{key, fields[key]})
+	}
+	return out
+}
+
+func marshalOrderedLogFields(fields [][2]any) ([]byte, error) {
+	if len(fields) == 0 {
+		return []byte("{}"), nil
+	}
+	var b strings.Builder
+	b.WriteByte('{')
+	for i, kv := range fields {
+		key, ok := kv[0].(string)
+		if !ok {
+			return nil, fmt.Errorf("log field key must be string")
+		}
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		keyRaw, err := json.Marshal(key)
+		if err != nil {
+			return nil, err
+		}
+		valRaw, err := json.Marshal(kv[1])
+		if err != nil {
+			return nil, err
+		}
+		b.Write(keyRaw)
+		b.WriteByte(':')
+		b.Write(valRaw)
+	}
+	b.WriteByte('}')
+	return []byte(b.String()), nil
+}
+
+func shouldOmitInferenceLogField(key string, v any) bool {
+	if key == "error" {
+		s, ok := v.(string)
+		return ok && strings.TrimSpace(s) == ""
+	}
+	return false
 }
 
 func sanitizeInferenceLogFields(fields map[string]any) map[string]any {
