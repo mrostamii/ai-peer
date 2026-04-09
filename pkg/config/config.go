@@ -52,6 +52,7 @@ type Config struct {
 
 	Network struct {
 		BootstrapPeers      []string `yaml:"bootstrap_peers"`
+		PublicDHT           bool     `yaml:"public_dht"`
 		DisableNATTraversal bool     `yaml:"disable_nat_traversal"`
 		EnableRelayService  bool     `yaml:"enable_relay_service"`
 	} `yaml:"network"`
@@ -217,6 +218,9 @@ func (c *Config) Validate() error {
 	}
 	if err := validatePort("listen.quic_port", c.Listen.QUICPort); err != nil {
 		return err
+	}
+	if !c.Network.PublicDHT && len(c.Network.BootstrapPeers) == 0 {
+		return fmt.Errorf("network.bootstrap_peers is required for the private Tooti DHT (omit network.public_dht or set false); set network.public_dht: true only to join the public IPFS DHT for experiments")
 	}
 	if c.Backend.Type != "ollama" {
 		return fmt.Errorf("backend.type must be \"ollama\" for v0.1")

@@ -18,7 +18,12 @@ listen:
   quic_port: 4001
 
 network:
-  bootstrap_peers: []
+  # Default is the private Tooti DHT (not the public IPFS swarm). List at least
+  # one reachable bootstrap, e.g. DNS from discover.tooti.network once wired.
+  public_dht: false
+  bootstrap_peers:
+    - "/ip4/51.195.145.102/tcp/4001/p2p/12D3KooWQXVG5RfM8P6Y1k9ihR1RUmfDfM2hPsoYwhhYp2Gy1AHJ"
+  # Set public_dht: true only for local experiments against the public IPFS DHT.
   # NAT traversal is enabled by default. Set true only if you need to disable
   # hole punching / UPnP / AutoNAT for a restricted environment.
   disable_nat_traversal: false

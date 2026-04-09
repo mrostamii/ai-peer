@@ -17,6 +17,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/core/protocol"
 	ping "github.com/libp2p/go-libp2p/p2p/protocol/ping"
 	noise "github.com/libp2p/go-libp2p/p2p/security/noise"
 	ma "github.com/multiformats/go-multiaddr"
@@ -26,6 +27,10 @@ import (
 )
 
 const bootstrapReconnectEvery = 30 * time.Second
+
+// TootiDHTProtocolPrefix is the libp2p Kademlia namespace for the Tooti network
+// (DHT sub-protocols become /tooti/kad/1.0.0, etc., instead of /ipfs/...).
+const TootiDHTProtocolPrefix = "/tooti"
 
 type Runtime struct {
 	host               host.Host
@@ -138,18 +143,29 @@ func resolveNATConfig(cfg *config.Config, bootstrapCount int) natConfig {
 }
 
 func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
-	useCustomBootstraps := len(cfg.Network.BootstrapPeers) > 0
 	var bootstraps []peer.AddrInfo
 	var err error
-	if useCustomBootstraps {
+	var useCustomBootstraps bool
+
+	if cfg.Network.PublicDHT {
+		if len(cfg.Network.BootstrapPeers) > 0 {
+			bootstraps, err = ParseBootstrapPeers(cfg.Network.BootstrapPeers)
+			if err != nil {
+				return nil, err
+			}
+			useCustomBootstraps = true
+			log.Printf("network.public_dht=true: public IPFS DHT with %d custom bootstrap peer(s)", len(bootstraps))
+		} else {
+			bootstraps = dht.GetDefaultBootstrapPeerAddrInfos()
+			log.Printf("network.public_dht=true: using %d default public IPFS DHT bootstrap peer(s)", len(bootstraps))
+		}
+	} else {
 		bootstraps, err = ParseBootstrapPeers(cfg.Network.BootstrapPeers)
 		if err != nil {
 			return nil, err
 		}
-		log.Printf("using %d custom bootstrap peer(s) from config", len(bootstraps))
-	} else {
-		bootstraps = dht.GetDefaultBootstrapPeerAddrInfos()
-		log.Printf("network.bootstrap_peers is empty; using %d default DHT bootstrap peer(s)", len(bootstraps))
+		useCustomBootstraps = true
+		log.Printf("private Tooti DHT (prefix %s): %d bootstrap peer(s)", TootiDHTProtocolPrefix, len(bootstraps))
 	}
 
 	listenTCP := fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", cfg.Listen.TCPPort)
@@ -194,10 +210,14 @@ func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 		return nil, fmt.Errorf("create libp2p host: %w", err)
 	}
 
-	kdht, err := dht.New(ctx, h,
+	dhtOpts := []dht.Option{
 		dht.Mode(dhtMode),
 		dht.BootstrapPeers(bootstraps...),
-	)
+	}
+	if !cfg.Network.PublicDHT {
+		dhtOpts = append(dhtOpts, dht.ProtocolPrefix(protocol.ID(TootiDHTProtocolPrefix)))
+	}
+	kdht, err := dht.New(ctx, h, dhtOpts...)
 	if err != nil {
 		_ = h.Close()
 		return nil, fmt.Errorf("create dht: %w", err)
