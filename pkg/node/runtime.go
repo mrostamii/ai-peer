@@ -45,6 +45,7 @@ type Runtime struct {
 	peerConnCount      map[peer.ID]int
 	peerLastGone       map[peer.ID]time.Time
 	peerDisconTmr      map[peer.ID]*time.Timer
+	bootstrapPeerIDs   map[peer.ID]struct{}
 
 	inflightInference atomic.Int64
 	statsMu           sync.RWMutex
@@ -85,7 +86,7 @@ func (r *Runtime) Connected(_ network.Network, c network.Conn) {
 	if prev == 0 {
 		lastGone, wasGone := r.peerLastGone[id]
 		delete(r.peerLastGone, id)
-		if !wasGone || time.Since(lastGone) >= peerLogDebounce {
+		if (!wasGone || time.Since(lastGone) >= peerLogDebounce) && r.shouldLogPeerLifecycle(id) {
 			log.Printf("peer connected: peer=%s addr=%s", id, c.RemoteMultiaddr())
 		}
 	}
@@ -108,11 +109,23 @@ func (r *Runtime) Disconnected(_ network.Network, c network.Conn) {
 				return
 			}
 			delete(r.peerDisconTmr, id)
-			log.Printf("peer disconnected: peer=%s addr=%s", id, addr)
+			if r.shouldLogPeerLifecycle(id) {
+				log.Printf("peer disconnected: peer=%s addr=%s", id, addr)
+			}
 		})
 		return
 	}
 	r.peerConnCount[id] = prev - 1
+}
+
+func (r *Runtime) shouldLogPeerLifecycle(id peer.ID) bool {
+	if _, ok := r.bootstrapPeerIDs[id]; ok {
+		return true
+	}
+	r.peerLogMu.Lock()
+	defer r.peerLogMu.Unlock()
+	_, ok := r.peerLogged[id.String()]
+	return ok
 }
 
 func resolveNATConfig(cfg *config.Config, bootstrapCount int) natConfig {
@@ -208,6 +221,12 @@ func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 		peerConnCount:      make(map[peer.ID]int),
 		peerLastGone:       make(map[peer.ID]time.Time),
 		peerDisconTmr:      make(map[peer.ID]*time.Timer),
+		bootstrapPeerIDs:   make(map[peer.ID]struct{}),
+	}
+	for _, b := range bootstraps {
+		if b.ID != "" {
+			r.bootstrapPeerIDs[b.ID] = struct{}{}
+		}
 	}
 	h.Network().Notify(r)
 	log.Printf("network nat: traversal=%t auto_relay=%t relay_service=%t bootstrap_candidates=%d",
