@@ -87,7 +87,7 @@ func (r *Runtime) Connected(_ network.Network, c network.Conn) {
 		lastGone, wasGone := r.peerLastGone[id]
 		delete(r.peerLastGone, id)
 		if (!wasGone || time.Since(lastGone) >= peerLogDebounce) && r.shouldLogPeerLifecycle(id) {
-			log.Printf("peer connected: peer=%s addr=%s", id, c.RemoteMultiaddr())
+			log.Printf("peer connected: peer=%s", formatPeerEndpoint(id, c.RemoteMultiaddr()))
 		}
 	}
 }
@@ -110,7 +110,7 @@ func (r *Runtime) Disconnected(_ network.Network, c network.Conn) {
 			}
 			delete(r.peerDisconTmr, id)
 			if r.shouldLogPeerLifecycle(id) {
-				log.Printf("peer disconnected: peer=%s addr=%s", id, addr)
+				log.Printf("peer disconnected: peer=%s", formatPeerEndpoint(id, ma.StringCast(addr)))
 			}
 		})
 		return
@@ -347,12 +347,42 @@ func (r *Runtime) connectBootstraps(ctx context.Context, logErrors bool) {
 		cancel()
 		if err != nil {
 			if logErrors {
-				log.Printf("bootstrap reconnect warning: peer=%s err=%v", b.ID, err)
+				log.Printf("bootstrap reconnect warning: peer=%v err=%v", formatPeerAddrInfo(b), err)
 			}
 			continue
 		}
-		log.Printf("bootstrap connected: peer=%s", b.ID)
+		log.Printf("bootstrap connected: peer=%v", formatPeerAddrInfo(b))
 	}
+}
+
+func formatPeerEndpoint(id peer.ID, addr ma.Multiaddr) string {
+	if addr == nil {
+		return fmt.Sprintf("/p2p/%s", id)
+	}
+	p2pAddrs, err := peer.AddrInfoToP2pAddrs(&peer.AddrInfo{
+		ID:    id,
+		Addrs: []ma.Multiaddr{addr},
+	})
+	if err != nil || len(p2pAddrs) == 0 {
+		return fmt.Sprintf("%s/p2p/%s", strings.TrimSuffix(addr.String(), "/"), id)
+	}
+	return p2pAddrs[0].String()
+}
+
+func formatPeerAddrInfo(info peer.AddrInfo) []string {
+	p2pAddrs, err := peer.AddrInfoToP2pAddrs(&info)
+	if err != nil || len(p2pAddrs) == 0 {
+		out := make([]string, 0, len(info.Addrs))
+		for _, a := range info.Addrs {
+			out = append(out, formatPeerEndpoint(info.ID, a))
+		}
+		return out
+	}
+	out := make([]string, 0, len(p2pAddrs))
+	for _, a := range p2pAddrs {
+		out = append(out, a.String())
+	}
+	return out
 }
 
 func ParseBootstrapPeers(raw []string) ([]peer.AddrInfo, error) {

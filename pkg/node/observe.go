@@ -97,8 +97,7 @@ func (r *Runtime) logNewPeerFromHealth(fromPeerID string, payload []byte) {
 
 	var health HealthUpdate
 	if err := json.Unmarshal(payload, &health); err != nil {
-		log.Printf("network peer established: peer_id=%s addrs=%v models=[] pricing=[] decode_error=%q",
-			fromPeerID,
+		log.Printf("network peer established: peer=%v models=[] pricing=[] decode_error=%q",
 			r.peerAddrStrings(fromPeerID),
 			err.Error(),
 		)
@@ -108,9 +107,7 @@ func (r *Runtime) logNewPeerFromHealth(fromPeerID string, payload []byte) {
 	models := append([]string(nil), health.Models...)
 	sort.Strings(models)
 	pricing := formatModelPricingForLog(health.ModelPricing)
-	log.Printf("network peer established: peer_id=%s heartbeat_node_id=%s addrs=%v models=%v pricing=%v",
-		fromPeerID,
-		health.NodeID,
+	log.Printf("network peer established: peer=%v models=%v pricing=%v",
 		r.peerAddrStrings(fromPeerID),
 		models,
 		pricing,
@@ -122,9 +119,15 @@ func (r *Runtime) peerAddrStrings(peerID string) []string {
 	if err != nil {
 		return nil
 	}
-	addrs := r.host.Peerstore().Addrs(id)
-	out := make([]string, 0, len(addrs))
-	for _, addr := range addrs {
+	p2pAddrs, err := peer.AddrInfoToP2pAddrs(&peer.AddrInfo{
+		ID:    id,
+		Addrs: r.host.Peerstore().Addrs(id),
+	})
+	if err != nil || len(p2pAddrs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(p2pAddrs))
+	for _, addr := range p2pAddrs {
 		out = append(out, addr.String())
 	}
 	sort.Strings(out)
