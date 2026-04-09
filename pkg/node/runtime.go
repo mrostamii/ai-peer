@@ -17,6 +17,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/core/protocol"
 	ping "github.com/libp2p/go-libp2p/p2p/protocol/ping"
 	noise "github.com/libp2p/go-libp2p/p2p/security/noise"
 	ma "github.com/multiformats/go-multiaddr"
@@ -27,11 +28,14 @@ import (
 
 const bootstrapReconnectEvery = 30 * time.Second
 
+// TootiDHTProtocolPrefix is the libp2p Kademlia namespace for the Tooti network
+// (DHT sub-protocols become /tooti/kad/1.0.0, etc., instead of /ipfs/...).
+const TootiDHTProtocolPrefix = "/tooti"
+
 type Runtime struct {
 	host               host.Host
 	dht                *dht.IpfsDHT
 	bootstraps         []peer.AddrInfo
-	reconnect          bool
 	startedAt          time.Time
 	metricsSrv         *http.Server
 	inferencePaywall   *x402InferencePaywallConfig
@@ -138,19 +142,11 @@ func resolveNATConfig(cfg *config.Config, bootstrapCount int) natConfig {
 }
 
 func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
-	useCustomBootstraps := len(cfg.Network.BootstrapPeers) > 0
-	var bootstraps []peer.AddrInfo
-	var err error
-	if useCustomBootstraps {
-		bootstraps, err = ParseBootstrapPeers(cfg.Network.BootstrapPeers)
-		if err != nil {
-			return nil, err
-		}
-		log.Printf("using %d custom bootstrap peer(s) from config", len(bootstraps))
-	} else {
-		bootstraps = dht.GetDefaultBootstrapPeerAddrInfos()
-		log.Printf("network.bootstrap_peers is empty; using %d default DHT bootstrap peer(s)", len(bootstraps))
+	bootstraps, err := ParseBootstrapPeers(ctx, cfg.Network.BootstrapPeers)
+	if err != nil {
+		return nil, err
 	}
+	log.Printf("Tooti DHT (prefix %s): %d bootstrap peer(s)", TootiDHTProtocolPrefix, len(bootstraps))
 
 	listenTCP := fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", cfg.Listen.TCPPort)
 	listenQUIC := fmt.Sprintf("/ip4/0.0.0.0/udp/%d/quic-v1", cfg.Listen.QUICPort)
@@ -197,6 +193,7 @@ func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 	kdht, err := dht.New(ctx, h,
 		dht.Mode(dhtMode),
 		dht.BootstrapPeers(bootstraps...),
+		dht.ProtocolPrefix(protocol.ID(TootiDHTProtocolPrefix)),
 	)
 	if err != nil {
 		_ = h.Close()
@@ -213,7 +210,6 @@ func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 		host:               h,
 		dht:                kdht,
 		bootstraps:         bootstraps,
-		reconnect:          useCustomBootstraps,
 		startedAt:          time.Now(),
 		paymentDebtByPayer: make(map[string]int64),
 		pendingPayByKey:    make(map[string]pendingInferenceResult),
@@ -242,11 +238,7 @@ func Start(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 	r.inferencePaywall = buildInferencePaywallConfig(cfg)
 	r.logDialAddrs()
 
-	if r.reconnect {
-		go r.bootstrapReconnectLoop(ctx)
-	} else {
-		log.Printf("default DHT bootstrap mode: reconnect loop disabled")
-	}
+	go r.bootstrapReconnectLoop(ctx)
 	if cfg.Metrics.Enabled {
 		metricsSrv, err := startMetricsServer(ctx, cfg.Metrics.Listen)
 		if err != nil {
@@ -383,22 +375,6 @@ func formatPeerAddrInfo(info peer.AddrInfo) []string {
 		out = append(out, a.String())
 	}
 	return out
-}
-
-func ParseBootstrapPeers(raw []string) ([]peer.AddrInfo, error) {
-	out := make([]peer.AddrInfo, 0, len(raw))
-	for _, s := range raw {
-		maddr, err := ma.NewMultiaddr(s)
-		if err != nil {
-			return nil, fmt.Errorf("invalid bootstrap multiaddr %q: %w", s, err)
-		}
-		info, err := peer.AddrInfoFromP2pAddr(maddr)
-		if err != nil {
-			return nil, fmt.Errorf("invalid bootstrap peer addr %q: %w", s, err)
-		}
-		out = append(out, *info)
-	}
-	return out, nil
 }
 
 func (r *Runtime) ConnectBootstrapsOnce(ctx context.Context) {

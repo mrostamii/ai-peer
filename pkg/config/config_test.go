@@ -71,7 +71,8 @@ listen:
   tcp_port: 0
   quic_port: 4001
 network:
-  bootstrap_peers: []
+  bootstrap_peers:
+    - "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWQXVG5RfM8P6Y1k9ihR1RUmfDfM2hPsoYwhhYp2Gy1AHJ"
 backend:
   type: "unknown"
   base_url: "not a url"
@@ -124,10 +125,10 @@ models:
 	}
 }
 
-func TestLoadAllowsEmptyBootstrapPeers(t *testing.T) {
+func TestLoadRejectsEmptyBootstrapPeers(t *testing.T) {
 	t.Parallel()
 	d := t.TempDir()
-	p := filepath.Join(d, "empty-bootstrap.yaml")
+	p := filepath.Join(d, "no-bootstrap.yaml")
 	err := os.WriteFile(p, []byte(`node:
   name: "x"
 listen:
@@ -147,8 +148,11 @@ models:
 	}
 
 	_, err = Load(p)
-	if err != nil {
-		t.Fatalf("expected empty bootstrap peers to be allowed, got: %v", err)
+	if err == nil {
+		t.Fatal("expected error for empty bootstrap_peers")
+	}
+	if !strings.Contains(err.Error(), "network.bootstrap_peers") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -162,7 +166,8 @@ listen:
   tcp_port: 4001
   quic_port: 4001
 network:
-  bootstrap_peers: []
+  bootstrap_peers:
+    - "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWQXVG5RfM8P6Y1k9ihR1RUmfDfM2hPsoYwhhYp2Gy1AHJ"
   disable_nat_traversal: true
   enable_relay_service: true
 backend:
@@ -198,7 +203,8 @@ listen:
   tcp_port: 4001
   quic_port: 4001
 network:
-  bootstrap_peers: []
+  bootstrap_peers:
+    - "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWQXVG5RfM8P6Y1k9ihR1RUmfDfM2hPsoYwhhYp2Gy1AHJ"
 models:
   advertised:
     - "llama3.2:latest"
@@ -229,7 +235,8 @@ listen:
   tcp_port: 4001
   quic_port: 4001
 network:
-  bootstrap_peers: []
+  bootstrap_peers:
+    - "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWQXVG5RfM8P6Y1k9ihR1RUmfDfM2hPsoYwhhYp2Gy1AHJ"
 models:
   advertised: []
 `), 0o644)
@@ -256,7 +263,8 @@ listen:
   tcp_port: 4001
   quic_port: 4001
 network:
-  bootstrap_peers: []
+  bootstrap_peers:
+    - "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWQXVG5RfM8P6Y1k9ihR1RUmfDfM2hPsoYwhhYp2Gy1AHJ"
 backend:
   type: "ollama"
   base_url: "http://127.0.0.1:11434"
@@ -288,7 +296,8 @@ listen:
   tcp_port: 4001
   quic_port: 4001
 network:
-  bootstrap_peers: []
+  bootstrap_peers:
+    - "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWQXVG5RfM8P6Y1k9ihR1RUmfDfM2hPsoYwhhYp2Gy1AHJ"
 backend:
   type: "ollama"
   base_url: "http://127.0.0.1:11434"
@@ -327,7 +336,8 @@ listen:
   tcp_port: 4001
   quic_port: 4001
 network:
-  bootstrap_peers: []
+  bootstrap_peers:
+    - "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWQXVG5RfM8P6Y1k9ihR1RUmfDfM2hPsoYwhhYp2Gy1AHJ"
 backend:
   type: "ollama"
   base_url: "http://127.0.0.1:11434"

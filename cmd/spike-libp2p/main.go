@@ -1,7 +1,8 @@
-// Spike-libp2p is a Phase 0.2 hands-on exercise: join the public IPFS Kademlia DHT,
-// advertise a fixed rendezvous CID, discover a peer via FindProviders, open a stream,
-// and exchange one line of text. Use it to measure discovery latency and to observe
-// whether connections are direct or relayed (NAT / hole-punching signal).
+// Spike-libp2p is a Phase 0.2 hands-on exercise: join a Kademlia DHT (public IPFS
+// by default; pass -private-dht for the Tooti /tooti namespace), advertise a fixed
+// rendezvous CID, discover a peer via FindProviders, open a stream, and exchange
+// one line of text. Use it to measure discovery latency and to observe whether
+// connections are direct or relayed (NAT / hole-punching signal).
 package main
 
 import (
@@ -108,8 +109,15 @@ func listenAddrStrings(tcpPort, quicPort int) []string {
 	}
 }
 
-func mergeBootstrap(extra []peer.AddrInfo) func() []peer.AddrInfo {
+const spikePrivateDHTPrefix = "/tooti"
+
+func mergeBootstrap(extra []peer.AddrInfo, private bool) func() []peer.AddrInfo {
 	return func() []peer.AddrInfo {
+		if private {
+			out := make([]peer.AddrInfo, len(extra))
+			copy(out, extra)
+			return out
+		}
 		base := dht.GetDefaultBootstrapPeerAddrInfos()
 		if len(extra) == 0 {
 			return base
@@ -152,7 +160,7 @@ func connSummary(h interface {
 	return strings.Join(parts, "; ")
 }
 
-func runListen(ctx context.Context, bootstraps []peer.AddrInfo, tcpPort, quicPort int) error {
+func runListen(ctx context.Context, bootstraps []peer.AddrInfo, tcpPort, quicPort int, privateDHT bool) error {
 	h, err := libp2p.New(
 		libp2p.ListenAddrStrings(listenAddrStrings(tcpPort, quicPort)...),
 		libp2p.EnableRelay(),
@@ -164,10 +172,14 @@ func runListen(ctx context.Context, bootstraps []peer.AddrInfo, tcpPort, quicPor
 	}
 	defer h.Close()
 
-	kdht, err := dht.New(ctx, h,
+	dhtOpts := []dht.Option{
 		dht.Mode(dht.ModeServer),
-		dht.BootstrapPeersFunc(mergeBootstrap(bootstraps)),
-	)
+		dht.BootstrapPeersFunc(mergeBootstrap(bootstraps, privateDHT)),
+	}
+	if privateDHT {
+		dhtOpts = append(dhtOpts, dht.ProtocolPrefix(protocol.ID(spikePrivateDHTPrefix)))
+	}
+	kdht, err := dht.New(ctx, h, dhtOpts...)
 	if err != nil {
 		return err
 	}
@@ -211,7 +223,7 @@ func runListen(ctx context.Context, bootstraps []peer.AddrInfo, tcpPort, quicPor
 	return ctx.Err()
 }
 
-func runDial(ctx context.Context, bootstraps []peer.AddrInfo, directPeer string, message string, tcpPort, quicPort int) error {
+func runDial(ctx context.Context, bootstraps []peer.AddrInfo, directPeer string, message string, tcpPort, quicPort int, privateDHT bool) error {
 	h, err := libp2p.New(
 		libp2p.ListenAddrStrings(listenAddrStrings(tcpPort, quicPort)...),
 		libp2p.EnableRelay(),
@@ -223,10 +235,14 @@ func runDial(ctx context.Context, bootstraps []peer.AddrInfo, directPeer string,
 	}
 	defer h.Close()
 
-	kdht, err := dht.New(ctx, h,
+	dhtOpts := []dht.Option{
 		dht.Mode(dht.ModeClient),
-		dht.BootstrapPeersFunc(mergeBootstrap(bootstraps)),
-	)
+		dht.BootstrapPeersFunc(mergeBootstrap(bootstraps, privateDHT)),
+	}
+	if privateDHT {
+		dhtOpts = append(dhtOpts, dht.ProtocolPrefix(protocol.ID(spikePrivateDHTPrefix)))
+	}
+	kdht, err := dht.New(ctx, h, dhtOpts...)
 	if err != nil {
 		return err
 	}
@@ -317,14 +333,15 @@ func runDial(ctx context.Context, bootstraps []peer.AddrInfo, directPeer string,
 
 func main() {
 	var (
-		listen     = flag.Bool("listen", false, "server: DHT provide + echo handler until interrupted")
-		bootstrap  multiaddrList
-		peerAddr   = flag.String("peer", "", "client: optional full /ip4/.../p2p/<id> (skips DHT discovery)")
-		msg        = flag.String("msg", "hello from tooti spike", "client: one-line payload")
-		tcpPort    = flag.Int("tcp-port", 0, "local TCP listen port (0 = random)")
-		quicPort   = flag.Int("quic-port", 0, "local QUIC UDP listen port (0 = random)")
+		listen      = flag.Bool("listen", false, "server: DHT provide + echo handler until interrupted")
+		privateDHT  = flag.Bool("private-dht", false, "use Tooti private DHT (/tooti); -bootstrap required (no public IPFS bootstraps)")
+		bootstrap   multiaddrList
+		peerAddr    = flag.String("peer", "", "client: optional full /ip4/.../p2p/<id> (skips DHT discovery)")
+		msg         = flag.String("msg", "hello from tooti spike", "client: one-line payload")
+		tcpPort     = flag.Int("tcp-port", 0, "local TCP listen port (0 = random)")
+		quicPort    = flag.Int("quic-port", 0, "local QUIC UDP listen port (0 = random)")
 	)
-	flag.Var(&bootstrap, "bootstrap", "extra bootstrap multiaddr (repeatable); merged before default IPFS bootstraps")
+	flag.Var(&bootstrap, "bootstrap", "bootstrap multiaddr (repeatable); with default public DHT, merged before IPFS defaults; with -private-dht, only these are used")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -333,6 +350,9 @@ func main() {
 	binfos, err := parseBootstrapAddrInfos(bootstrap)
 	if err != nil {
 		log.Fatal(err)
+	}
+	if *privateDHT && len(binfos) == 0 {
+		log.Fatal("-private-dht requires at least one -bootstrap multiaddr")
 	}
 
 	if *listen && *peerAddr != "" {
@@ -346,12 +366,12 @@ func main() {
 	}
 
 	if *listen {
-		if err := runListen(ctx, binfos, *tcpPort, *quicPort); err != nil && !errors.Is(err, context.Canceled) {
+		if err := runListen(ctx, binfos, *tcpPort, *quicPort, *privateDHT); err != nil && !errors.Is(err, context.Canceled) {
 			log.Fatal(err)
 		}
 		return
 	}
-	if err := runDial(ctx, binfos, *peerAddr, *msg, *tcpPort, *quicPort); err != nil {
+	if err := runDial(ctx, binfos, *peerAddr, *msg, *tcpPort, *quicPort, *privateDHT); err != nil {
 		log.Fatal(err)
 	}
 }

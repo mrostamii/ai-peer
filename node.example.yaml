@@ -18,9 +18,12 @@ listen:
   quic_port: 4001
 
 network:
-  bootstrap_peers: []
-  # NAT traversal is enabled by default. Set true only if you need to disable
-  # hole punching / UPnP / AutoNAT for a restricted environment.
+  # At least one bootstrap. Peer ids can come from DNS TXT (dnsaddr-only) or from
+  # each multiaddr (_dnsaddr.<host> TXT records with dnsaddr=/ip4/.../p2p/...).
+  bootstrap_peers:
+    - "/dnsaddr/discover.tooti.network"
+  # NAT traversal is enabled by default. Set disable_nat_traversal: true only if
+  # you need to disable hole punching / UPnP / AutoNAT for a restricted environment.
   disable_nat_traversal: false
   # Optional: allow this node to act as a relay service when publicly reachable.
   enable_relay_service: false

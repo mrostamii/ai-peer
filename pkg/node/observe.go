@@ -27,11 +27,7 @@ func StartObserving(ctx context.Context, cfg *config.Config, onHealth func([]byt
 	}
 	r.logDialAddrs()
 
-	if r.reconnect {
-		go r.bootstrapReconnectLoop(ctx)
-	} else {
-		log.Printf("default DHT bootstrap mode: reconnect loop disabled")
-	}
+	go r.bootstrapReconnectLoop(ctx)
 
 	ps, err := pubsub.NewGossipSub(ctx, r.host)
 	if err != nil {
@@ -49,12 +45,6 @@ func StartObserving(ctx context.Context, cfg *config.Config, onHealth func([]byt
 		return nil, fmt.Errorf("subscribe health topic: %w", err)
 	}
 	go r.healthSubscribeLoop(ctx, sub, onHealth)
-	// Seed routing table quickly only when reconnect loop is disabled.
-	if !r.reconnect {
-		go func() {
-			r.ConnectBootstrapsOnce(ctx)
-		}()
-	}
 	return r, nil
 }
 

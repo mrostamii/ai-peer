@@ -218,6 +218,9 @@ func (c *Config) Validate() error {
 	if err := validatePort("listen.quic_port", c.Listen.QUICPort); err != nil {
 		return err
 	}
+	if len(c.Network.BootstrapPeers) == 0 {
+		return fmt.Errorf("network.bootstrap_peers is required (Tooti uses the private /tooti DHT only)")
+	}
 	if c.Backend.Type != "ollama" {
 		return fmt.Errorf("backend.type must be \"ollama\" for v0.1")
 	}
