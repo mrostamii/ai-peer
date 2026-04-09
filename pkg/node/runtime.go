@@ -149,7 +149,7 @@ func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 
 	if cfg.Network.PublicDHT {
 		if len(cfg.Network.BootstrapPeers) > 0 {
-			bootstraps, err = ParseBootstrapPeers(cfg.Network.BootstrapPeers)
+			bootstraps, err = ParseBootstrapPeers(ctx, cfg.Network.BootstrapPeers)
 			if err != nil {
 				return nil, err
 			}
@@ -160,7 +160,7 @@ func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 			log.Printf("network.public_dht=true: using %d default public IPFS DHT bootstrap peer(s)", len(bootstraps))
 		}
 	} else {
-		bootstraps, err = ParseBootstrapPeers(cfg.Network.BootstrapPeers)
+		bootstraps, err = ParseBootstrapPeers(ctx, cfg.Network.BootstrapPeers)
 		if err != nil {
 			return nil, err
 		}
@@ -403,22 +403,6 @@ func formatPeerAddrInfo(info peer.AddrInfo) []string {
 		out = append(out, a.String())
 	}
 	return out
-}
-
-func ParseBootstrapPeers(raw []string) ([]peer.AddrInfo, error) {
-	out := make([]peer.AddrInfo, 0, len(raw))
-	for _, s := range raw {
-		maddr, err := ma.NewMultiaddr(s)
-		if err != nil {
-			return nil, fmt.Errorf("invalid bootstrap multiaddr %q: %w", s, err)
-		}
-		info, err := peer.AddrInfoFromP2pAddr(maddr)
-		if err != nil {
-			return nil, fmt.Errorf("invalid bootstrap peer addr %q: %w", s, err)
-		}
-		out = append(out, *info)
-	}
-	return out, nil
 }
 
 func (r *Runtime) ConnectBootstrapsOnce(ctx context.Context) {

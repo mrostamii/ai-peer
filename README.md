@@ -52,6 +52,10 @@ flowchart LR
 - **Registry + Router**: tracks live nodes and selects where each request should go
 - **Gateway**: exposes `/v1/models` and `/v1/chat/completions` for client apps
 
+## Network bootstrap
+
+For the private DHT, configure `network.bootstrap_peers` (e.g. `/dnsaddr/discover.tooti.network` to expand peer ids from TXT, or a full `/ip4/.../p2p/...`).
+
 ## Quick start
 
 ### 1) Build
