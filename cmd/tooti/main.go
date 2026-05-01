@@ -36,7 +36,7 @@ func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("tooti")
 		fmt.Println("usage: tooti config-check -file ./node.yaml")
-		fmt.Println("usage: tooti pay chat -url http://127.0.0.1:8080/v1/chat/completions -model qwen2.5:3b -message \"say hi\"")
+		fmt.Println("usage: tooti pay chat -url http://127.0.0.1:8080/v1/chat/completions [-api-key <prepaid>] -model qwen2.5:3b -message \"say hi\"")
 		fmt.Println("usage: tooti pay topup -gateway http://127.0.0.1:8080 -amount-usdc 5")
 		return
 	}
@@ -761,7 +761,7 @@ func runNetworkModels(args []string) {
 
 func runPay(args []string) {
 	if len(args) == 0 {
-		fmt.Println("usage: tooti pay chat -url http://127.0.0.1:8080/v1/chat/completions -model qwen2.5:3b -message \"say hi\"")
+		fmt.Println("usage: tooti pay chat -url http://127.0.0.1:8080/v1/chat/completions [-api-key <prepaid>] -model qwen2.5:3b -message \"say hi\"")
 		fmt.Println("usage: tooti pay topup -gateway http://127.0.0.1:8080 -amount-usdc 5")
 		fmt.Println("usage: tooti pay balance -gateway http://127.0.0.1:8080")
 		fmt.Println("usage: tooti pay rotate-key -gateway http://127.0.0.1:8080")
@@ -789,6 +789,7 @@ func runPay(args []string) {
 func runPayChat(args []string) {
 	fs := flag.NewFlagSet("pay chat", flag.ExitOnError)
 	url := fs.String("url", "http://127.0.0.1:8080/v1/chat/completions", "chat completions endpoint URL")
+	apiKeyFlag := fs.String("api-key", "", "prepaid API key (Bearer); defaults to ~/.tooti/pay-state.json profile for -url host")
 	model := fs.String("model", "qwen2.5:3b", "model name")
 	message := fs.String("message", "say hi", "user message content")
 	stream := fs.Bool("stream", true, "request streaming response")
@@ -796,13 +797,7 @@ func runPayChat(args []string) {
 	privateKey := fs.String("private-key", "", "optional private key override")
 	_ = fs.Parse(args)
 
-	client, err := x402client.NewFromEnv()
-	if err != nil {
-		log.Fatalf("wallet error: %v", err)
-	}
-	if strings.TrimSpace(*privateKey) != "" {
-		client.PrivateKey = strings.TrimSpace(*privateKey)
-	}
+	apiKey := prepaidAPIKeyForChatURL(*url, *apiKeyFlag)
 
 	body := map[string]any{
 		"model":  *model,
@@ -824,10 +819,28 @@ func runPayChat(args []string) {
 		log.Fatalf("request create error: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
 
-	resp, err := client.DoWithPayment(req)
-	if err != nil {
-		log.Fatalf("request failed: %v", err)
+	var resp *http.Response
+	if apiKey != "" {
+		resp, err = http.DefaultClient.Do(req)
+		if err != nil {
+			log.Fatalf("request failed: %v", err)
+		}
+	} else {
+		client, werr := x402client.NewFromEnv()
+		if werr != nil {
+			log.Fatalf("wallet error: %v (set EVM_PRIVATE_KEY for x402 chat, or use -api-key / pay topup for prepaid)", werr)
+		}
+		if strings.TrimSpace(*privateKey) != "" {
+			client.PrivateKey = strings.TrimSpace(*privateKey)
+		}
+		resp, err = client.DoWithPayment(req)
+		if err != nil {
+			log.Fatalf("request failed: %v", err)
+		}
 	}
 	defer resp.Body.Close()
 
