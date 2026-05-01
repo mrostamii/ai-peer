@@ -1,6 +1,11 @@
 node:
   name: "ovh-lon-1"
   identity_key_file: "./data/node_identity.key" # persist peer ID across restarts
+  # Optional: when non-empty, only these libp2p peers (official gateways) may open
+  # inference streams. Empty = allow any peer (homelab). Users bill via gateway;
+  # configure each gateway's peer id from its logs (`node peer id`).
+  # allowed_gateway_peers:
+  #   - "12D3KooW..."
   x402:
     enabled: false
     facilitator_url: "https://x402.org/facilitator"

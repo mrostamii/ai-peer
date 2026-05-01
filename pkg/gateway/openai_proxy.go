@@ -139,6 +139,13 @@ func (p *OpenAIProxy) SetAuthMode(mode string) {
 	p.authMode = mode
 }
 
+// isOfficialPrepaidOnly is true for hosted gateways with a control store (prepaid DB).
+func (p *OpenAIProxy) isOfficialPrepaidOnly() bool {
+	return p != nil &&
+		strings.EqualFold(strings.TrimSpace(p.gatewayMode), "official") &&
+		p.controlStore != nil
+}
+
 func (p *OpenAIProxy) SetPeerLatencyFunc(fn PeerLatencyFunc) {
 	p.peerLatency = fn
 }
@@ -313,11 +320,20 @@ func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
+	if p.isOfficialPrepaidOnly() {
+		if principal == nil || !strings.EqualFold(strings.TrimSpace(principal.ConsumerType), "prepaid") {
+			_ = writeJSON(w, http.StatusForbidden, openAIError(http.StatusForbidden, "official gateway requires a prepaid API key"))
+			return
+		}
+	}
 	prepaidSession, ok := p.beginPrepaidReservation(w, r, requestID, principal, &oreq)
 	if !ok {
 		return
 	}
-	if !p.enforceChatPayment(w, r, &oreq) {
+	// Official gateways bill prepaid only on chat; x402 is reserved for /v1/prepaid/topup.
+	// Community gateways may still enable managed chat x402 when configured.
+	needChatX402 := !p.isOfficialPrepaidOnly() && (prepaidSession == nil || !prepaidSession.Enabled)
+	if needChatX402 && !p.enforceChatPayment(w, r, &oreq) {
 		p.finalizePrepaidReservation(r.Context(), prepaidSession, &oreq, 0, false)
 		return
 	}
@@ -358,13 +374,17 @@ func (p *OpenAIProxy) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 		nodes := rankedNodesForModel(p.reg, oreq.Model)
 		nodes = p.reorderNodesByPing(r.Context(), nodes)
 		if len(nodes) > 0 {
+			paymentSig := strings.TrimSpace(r.Header.Get("PAYMENT-SIGNATURE"))
+			if p.isOfficialPrepaidOnly() {
+				paymentSig = ""
+			}
 			remoteReq := &RemoteChatRequest{
 				RequestID:        requestID,
 				Model:            oreq.Model,
 				MaxTokens:        oreq.MaxTokens,
 				Messages:         make([]RemoteChatMessage, 0, len(oreq.Messages)),
 				Temperature:      oreq.Temperature,
-				PaymentSignature: strings.TrimSpace(r.Header.Get("PAYMENT-SIGNATURE")),
+				PaymentSignature: paymentSig,
 				ResourceURL:      requestURL(r),
 			}
 			for _, msg := range oreq.Messages {
@@ -497,12 +517,16 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 			}
 			selectedNode = node.NodeID
 			attemptStarted := time.Now()
-			rc, err := p.remoteStreamChat(reqCtx, node.NodeID, &RemoteChatRequest{
+			streamSig := strings.TrimSpace(r.Header.Get("PAYMENT-SIGNATURE"))
+			if p.isOfficialPrepaidOnly() {
+				streamSig = ""
+			}
+			streamRemote := &RemoteChatRequest{
 				RequestID:        requestID,
 				Model:            oreq.Model,
 				MaxTokens:        oreq.MaxTokens,
 				Temperature:      oreq.Temperature,
-				PaymentSignature: strings.TrimSpace(r.Header.Get("PAYMENT-SIGNATURE")),
+				PaymentSignature: streamSig,
 				ResourceURL:      requestURL(r),
 				Messages: func() []RemoteChatMessage {
 					out := make([]RemoteChatMessage, 0, len(oreq.Messages))
@@ -511,7 +535,8 @@ func (p *OpenAIProxy) handleChatCompletionsStream(w http.ResponseWriter, r *http
 					}
 					return out
 				}(),
-			})
+			}
+			rc, err := p.remoteStreamChat(reqCtx, node.NodeID, streamRemote)
 			if err != nil {
 				var payErr *RemotePaymentRequiredError
 				if errors.As(err, &payErr) {

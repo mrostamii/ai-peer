@@ -18,7 +18,6 @@ import (
 
 	"github.com/mrostamii/tooti/pkg/apiv1"
 	"github.com/mrostamii/tooti/pkg/backend/ollama"
-	"github.com/mrostamii/tooti/pkg/x402spike"
 )
 
 const InferenceProtocolID = protocol.ID("/tooti/v0.1/inference/1.0.0")
@@ -42,7 +41,6 @@ func (r *Runtime) registerInferenceHandler(backend inferenceBackend) {
 		reqID := ""
 		model := ""
 		tokensUsed := int64(0)
-		var paymentSession *inferencePaymentSession
 		success := false
 		failure := ""
 		defer func() {
@@ -69,31 +67,14 @@ func (r *Runtime) registerInferenceHandler(backend inferenceBackend) {
 		}
 		reqID = req.GetRequestId()
 		model = req.GetModel()
-		if sess, paymentErr, ok := r.enforceInferencePayment(&req); !ok {
-			failure = "payment required"
+		remoteID := s.Conn().RemotePeer()
+		if !r.isAllowedInferencePeer(remoteID) {
+			failure = "unauthorized inference peer"
 			_ = json.NewEncoder(s).Encode(&apiv1.InferenceResponse{
 				RequestId:    req.GetRequestId(),
 				Ok:           false,
-				ErrorMessage: paymentErr,
+				ErrorMessage: "unauthorized inference peer",
 			})
-			return
-		} else {
-			paymentSession = sess
-		}
-		if paymentSession != nil && paymentSession.PendingResult != nil {
-			success = true
-			tokensUsed = paymentSession.PendingResult.TokensUsed
-			resp := &apiv1.InferenceResponse{
-				RequestId:  req.GetRequestId(),
-				Content:    paymentSession.PendingResult.Content,
-				TokensUsed: paymentSession.PendingResult.TokensUsed,
-				LatencyMs:  paymentSession.PendingResult.LatencyMs,
-				Ok:         true,
-			}
-			if err := json.NewEncoder(s).Encode(resp); err != nil {
-				log.Printf("inference stream encode warning: %v", err)
-			}
-			r.deletePendingInferenceResult(paymentSession.PaymentKey)
 			return
 		}
 		started := time.Now()
@@ -112,38 +93,6 @@ func (r *Runtime) registerInferenceHandler(backend inferenceBackend) {
 		r.recordInferenceSample(total, total, resp.GetTokensUsed())
 		tokensUsed = resp.GetTokensUsed()
 		resp.LatencyMs = time.Since(started).Milliseconds()
-		if paymentSession != nil {
-			actualDue := r.computeActualDueAtomic(paymentSession, tokensUsed)
-			outstanding := paymentSession.PriorDebtAtomic + actualDue - paymentSession.PrepaidAtomic
-			if outstanding > 0 {
-				r.setPaymentDebt(paymentSession.Payer, outstanding)
-				r.setPendingInferenceResult(paymentSession.PaymentKey, pendingInferenceResult{
-					Content:    resp.GetContent(),
-					TokensUsed: tokensUsed,
-					LatencyMs:  resp.GetLatencyMs(),
-				})
-				finalReq := paymentSession.Requirement
-				finalReq.Amount = strconv.FormatInt(outstanding, 10)
-				pr := x402spike.PaymentRequired{
-					X402Version: 2,
-					Error:       "final payment required for exact settlement",
-					Resource: x402spike.ResourceInfo{
-						URL:         paymentSession.ResourceURL,
-						Description: "final settlement for completed inference",
-						MimeType:    "application/json",
-					},
-					Accepts: []x402spike.PaymentRequirements{finalReq},
-				}
-				failure = "payment required"
-				_ = json.NewEncoder(s).Encode(&apiv1.InferenceResponse{
-					RequestId:    req.GetRequestId(),
-					Ok:           false,
-					ErrorMessage: encodePaymentRequiredEnvelope("final payment required", pr, x402spike.SettlementResponse{}),
-				})
-				return
-			}
-		}
-		r.reconcileActualUsage(paymentSession, tokensUsed)
 		success = true
 		if err := json.NewEncoder(s).Encode(resp); err != nil {
 			log.Printf("inference stream encode warning: %v", err)
@@ -160,7 +109,6 @@ func (r *Runtime) registerInferenceStreamHandler(backend streamInferenceBackend)
 		reqID := ""
 		model := ""
 		tokensUsed := int64(0)
-		var paymentSession *inferencePaymentSession
 		success := false
 		failure := ""
 		var sampleTotal time.Duration
@@ -197,17 +145,16 @@ func (r *Runtime) registerInferenceStreamHandler(backend streamInferenceBackend)
 		}
 		reqID = req.GetRequestId()
 		model = req.GetModel()
-		if sess, paymentErr, ok := r.enforceInferencePayment(&req); !ok {
-			failure = "payment required"
+		remoteID := s.Conn().RemotePeer()
+		if !r.isAllowedInferencePeer(remoteID) {
+			failure = "unauthorized inference peer"
 			_ = json.NewEncoder(s).Encode(&apiv1.InferenceStreamChunk{
 				RequestId:    req.GetRequestId(),
 				Done:         true,
 				Ok:           false,
-				ErrorMessage: paymentErr,
+				ErrorMessage: "unauthorized inference peer",
 			})
 			return
-		} else {
-			paymentSession = sess
 		}
 		rc, err := inferStreamWithBackend(context.Background(), backend, &req)
 		if err != nil {
@@ -273,14 +220,10 @@ func (r *Runtime) registerInferenceStreamHandler(backend streamInferenceBackend)
 				Ok:         true,
 			}); err != nil {
 				failure = "encode response chunk: " + err.Error()
-				if paymentSession != nil {
-					r.markAbortedStreamDebt(paymentSession)
-				}
 				return
 			}
 			if chunk.Done {
 				tokensUsed = int64(chunk.PromptEvalCount + chunk.EvalCount)
-				r.reconcileActualUsage(paymentSession, tokensUsed)
 				sampleTotal = time.Since(streamStarted)
 				if sampleTTFT <= 0 {
 					sampleTTFT = sampleTotal

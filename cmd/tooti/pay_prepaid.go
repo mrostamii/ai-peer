@@ -46,6 +46,24 @@ func parsePayAmountShortcut(raw string) (float64, bool) {
 	return v, true
 }
 
+// prepaidAPIKeyForChatURL returns explicitKey if set, otherwise the API key saved in pay-state
+// for the gateway host derived from chatURL (same profile key as pay topup/balance).
+func prepaidAPIKeyForChatURL(chatURL, explicitKey string) string {
+	if k := strings.TrimSpace(explicitKey); k != "" {
+		return k
+	}
+	u, err := url.Parse(strings.TrimSpace(chatURL))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	base := (&url.URL{Scheme: u.Scheme, Host: u.Host}).String()
+	state, err := loadPayState()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(state.Profiles[normalizeGatewayURL(base)].APIKey)
+}
+
 func runPayTopup(args []string) {
 	fs := flag.NewFlagSet("pay topup", flag.ExitOnError)
 	gatewayURL := fs.String("gateway", "http://127.0.0.1:8080", "official gateway base URL")

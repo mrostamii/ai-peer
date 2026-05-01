@@ -256,6 +256,109 @@ func TestHandleChatCompletionsPrepaidFinalizesReservation(t *testing.T) {
 	}
 }
 
+func TestHandleChatCompletionsPrepaidSkipsManagedX402Paywall(t *testing.T) {
+	t.Parallel()
+	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/chat" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{
+			"model":"llama3.2:latest",
+			"message":{"role":"assistant","content":"hi"},
+			"prompt_eval_count":5,
+			"eval_count":3
+		}`))
+	}))
+	defer ollama.Close()
+
+	p := NewOpenAIProxy("127.0.0.1:0", ollama.URL, nil)
+	store := &mockControlStore{
+		lookupAPIKeyResult: &APIKeyPrincipal{
+			ConsumerID:   "consumer-prepaid",
+			ConsumerType: "prepaid",
+		},
+		reservePrepaidResult: PrepaidReserveResult{
+			Approved:     true,
+			ReservedUSDC: 0.01,
+			BalanceAfter: 1.0,
+		},
+	}
+	p.SetControlStore(store)
+	p.SetAuthMode("required")
+	p.SetX402ChatPaywall(&X402PaywallConfig{
+		Requirement: x402spike.PaymentRequirements{
+			Scheme:            "exact",
+			Network:           "eip155:84532",
+			Amount:            "10000",
+			Asset:             "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+			PayTo:             "0x0000000000000000000000000000000000000001",
+			MaxTimeoutSeconds: 60,
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"llama3.2:latest",
+		"messages":[{"role":"user","content":"hello"}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer toot_api_test")
+	// Deliberately no PAYMENT-SIGNATURE — managed paywall must not apply for prepaid.
+	rr := httptest.NewRecorder()
+	p.handleChatCompletions(rr, req)
+
+	if rr.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status=%d want %d", rr.Result().StatusCode, http.StatusOK)
+	}
+	if !store.reservePrepaidCalled {
+		t.Fatal("expected reserve prepaid to be called")
+	}
+	if !store.finalizePrepaidCalled {
+		t.Fatal("expected finalize prepaid to be called")
+	}
+}
+
+func TestHandleChatCompletionsManagedX402RequiresPaymentWithoutPrepaidHold(t *testing.T) {
+	t.Parallel()
+	p := NewOpenAIProxy("127.0.0.1:0", "http://unused", nil)
+	store := &mockControlStore{
+		lookupAPIKeyResult: &APIKeyPrincipal{
+			ConsumerID:   "consumer-x402",
+			ConsumerType: "x402",
+		},
+	}
+	p.SetControlStore(store)
+	p.SetAuthMode("required")
+	p.SetX402ChatPaywall(&X402PaywallConfig{
+		Requirement: x402spike.PaymentRequirements{
+			Scheme:            "exact",
+			Network:           "eip155:84532",
+			Amount:            "10000",
+			Asset:             "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+			PayTo:             "0x0000000000000000000000000000000000000001",
+			MaxTimeoutSeconds: 60,
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model":"llama3.2:latest",
+		"messages":[{"role":"user","content":"hello"}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer toot_api_test")
+	rr := httptest.NewRecorder()
+	p.handleChatCompletions(rr, req)
+
+	if rr.Result().StatusCode != http.StatusPaymentRequired {
+		t.Fatalf("status=%d want %d", rr.Result().StatusCode, http.StatusPaymentRequired)
+	}
+	if store.reservePrepaidCalled {
+		t.Fatal("did not expect prepaid reserve for x402 consumer")
+	}
+	if rr.Result().Header.Get("PAYMENT-REQUIRED") == "" {
+		t.Fatal("expected PAYMENT-REQUIRED header")
+	}
+}
+
 func TestHandleChatCompletionsOfficialRecordsUsageEvent(t *testing.T) {
 	t.Parallel()
 	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -271,7 +374,17 @@ func TestHandleChatCompletionsOfficialRecordsUsageEvent(t *testing.T) {
 	}))
 	defer ollama.Close()
 
-	store := &mockControlStore{}
+	store := &mockControlStore{
+		lookupAPIKeyResult: &APIKeyPrincipal{
+			ConsumerID:   "consumer-official",
+			ConsumerType: "prepaid",
+		},
+		reservePrepaidResult: PrepaidReserveResult{
+			Approved:     true,
+			ReservedUSDC: 1,
+			BalanceAfter: 10,
+		},
+	}
 	p := NewOpenAIProxy("127.0.0.1:0", ollama.URL, nil)
 	p.SetGatewayMode("official")
 	p.SetGatewayID("gw-test")
@@ -283,6 +396,7 @@ func TestHandleChatCompletionsOfficialRecordsUsageEvent(t *testing.T) {
 		"messages":[{"role":"user","content":"hello"}]
 	}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer tooti_prepaid_key")
 	rr := httptest.NewRecorder()
 	p.handleChatCompletions(rr, req)
 
@@ -305,7 +419,7 @@ func TestHandleChatCompletionsOfficialRecordsUsageEvent(t *testing.T) {
 	if ev.Model != "llama3.2:latest" || ev.TokensIn != 4 || ev.TokensOut != 2 {
 		t.Fatalf("tokens/model: %+v", ev)
 	}
-	if ev.Status != "ok" || ev.PaymentMethod != "none" {
+	if ev.Status != "ok" || ev.PaymentMethod != "prepaid" {
 		t.Fatalf("status/payment: %+v", ev)
 	}
 }
