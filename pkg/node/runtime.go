@@ -33,23 +33,21 @@ const bootstrapReconnectEvery = 30 * time.Second
 const TootiDHTProtocolPrefix = "/tooti"
 
 type Runtime struct {
-	host               host.Host
-	dht                *dht.IpfsDHT
-	bootstraps         []peer.AddrInfo
-	startedAt          time.Time
-	metricsSrv         *http.Server
-	inferencePaywall   *x402InferencePaywallConfig
-	paymentDebtMu      sync.Mutex
-	paymentDebtByPayer map[string]int64
-	pendingPayMu       sync.Mutex
-	pendingPayByKey    map[string]pendingInferenceResult
-	peerLogMu          sync.Mutex
-	peerLogged         map[string]struct{}
-	peerConnMu         sync.Mutex
-	peerConnCount      map[peer.ID]int
-	peerLastGone       map[peer.ID]time.Time
-	peerDisconTmr      map[peer.ID]*time.Timer
-	bootstrapPeerIDs   map[peer.ID]struct{}
+	host                host.Host
+	dht                 *dht.IpfsDHT
+	bootstraps          []peer.AddrInfo
+	startedAt           time.Time
+	metricsSrv          *http.Server
+	allowedGatewayPeers map[peer.ID]struct{}
+	paymentDebtMu       sync.Mutex
+	paymentDebtByPayer  map[string]int64
+	peerLogMu           sync.Mutex
+	peerLogged          map[string]struct{}
+	peerConnMu          sync.Mutex
+	peerConnCount       map[peer.ID]int
+	peerLastGone        map[peer.ID]time.Time
+	peerDisconTmr       map[peer.ID]*time.Timer
+	bootstrapPeerIDs    map[peer.ID]struct{}
 
 	inflightInference atomic.Int64
 	statsMu           sync.RWMutex
@@ -207,17 +205,17 @@ func startBase(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 	}
 
 	r := &Runtime{
-		host:               h,
-		dht:                kdht,
-		bootstraps:         bootstraps,
-		startedAt:          time.Now(),
-		paymentDebtByPayer: make(map[string]int64),
-		pendingPayByKey:    make(map[string]pendingInferenceResult),
-		peerLogged:         make(map[string]struct{}),
-		peerConnCount:      make(map[peer.ID]int),
-		peerLastGone:       make(map[peer.ID]time.Time),
-		peerDisconTmr:      make(map[peer.ID]*time.Timer),
-		bootstrapPeerIDs:   make(map[peer.ID]struct{}),
+		host:                h,
+		dht:                 kdht,
+		bootstraps:          bootstraps,
+		startedAt:           time.Now(),
+		allowedGatewayPeers: make(map[peer.ID]struct{}),
+		paymentDebtByPayer:  make(map[string]int64),
+		peerLogged:          make(map[string]struct{}),
+		peerConnCount:       make(map[peer.ID]int),
+		peerLastGone:        make(map[peer.ID]time.Time),
+		peerDisconTmr:       make(map[peer.ID]*time.Timer),
+		bootstrapPeerIDs:    make(map[peer.ID]struct{}),
 	}
 	for _, b := range bootstraps {
 		if b.ID != "" {
@@ -235,7 +233,22 @@ func Start(ctx context.Context, cfg *config.Config) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
-	r.inferencePaywall = buildInferencePaywallConfig(cfg)
+	for _, ps := range cfg.Node.AllowedGatewayPeers {
+		ps = strings.TrimSpace(ps)
+		if ps == "" {
+			continue
+		}
+		pid, err := peer.Decode(ps)
+		if err != nil {
+			_ = r.dht.Close()
+			_ = r.host.Close()
+			return nil, fmt.Errorf("node.allowed_gateway_peers: invalid peer id %q: %w", ps, err)
+		}
+		r.allowedGatewayPeers[pid] = struct{}{}
+	}
+	if len(r.allowedGatewayPeers) > 0 {
+		log.Printf("inference access: allowlist active (%d official gateway peer id(s))", len(r.allowedGatewayPeers))
+	}
 	r.logDialAddrs()
 
 	go r.bootstrapReconnectLoop(ctx)
@@ -413,4 +426,15 @@ func (r *Runtime) PingPeer(ctx context.Context, target peer.ID) (time.Duration, 
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	}
+}
+
+func (r *Runtime) isAllowedInferencePeer(id peer.ID) bool {
+	if r == nil || id == "" {
+		return false
+	}
+	if len(r.allowedGatewayPeers) == 0 {
+		return true
+	}
+	_, ok := r.allowedGatewayPeers[id]
+	return ok
 }

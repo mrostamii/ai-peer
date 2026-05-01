@@ -31,7 +31,10 @@ type Config struct {
 	Node struct {
 		Name            string `yaml:"name"`
 		IdentityKeyFile string `yaml:"identity_key_file"`
-		X402            struct {
+		// AllowedGatewayPeers lists libp2p peer IDs of official gateways that may open
+		// inference streams when non-empty. Empty allows any peer (local/homelab).
+		AllowedGatewayPeers []string `yaml:"allowed_gateway_peers"`
+		X402                struct {
 			Enabled             bool   `yaml:"enabled"`
 			FacilitatorURL      string `yaml:"facilitator_url"`
 			Network             string `yaml:"network"`
@@ -89,7 +92,7 @@ type Config struct {
 		ControlAPIToken string `yaml:"control_api_token"`
 		// AuthMode controls API key behavior for hosted gateways.
 		// Allowed: off | optional | required
-		AuthMode  string `yaml:"auth_mode"`
+		AuthMode string `yaml:"auth_mode"`
 		Telemetry struct {
 			Enabled          bool   `yaml:"enabled"`
 			Endpoint         string `yaml:"endpoint"`

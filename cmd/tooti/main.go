@@ -203,12 +203,12 @@ func runGatewayStart(args []string) {
 	listen := fs.String("listen", "", "gateway listen address override")
 	ollamaBase := fs.String("ollama", "", "ollama base URL override (optional)")
 	localBackend := fs.Bool("local-backend", false, "enable local Ollama fallback in gateway (default false: remote-only routing)")
-	x402Mode := fs.String("x402-mode", "off", "x402 mode: off|managed (managed = gateway-owned paywall, off = decentralized routing only)")
+	x402Mode := fs.String("x402-mode", "off", "deprecated; chat x402 removed — use prepaid API keys and x402 top-up only")
 	x402Enable := fs.Bool("x402-enable", false, "enable x402 payment requirement for /v1/chat/completions")
 	x402Facilitator := fs.String("x402-facilitator", "", "x402 facilitator base URL (e.g. https://x402.org/facilitator)")
 	x402Network := fs.String("x402-network", "eip155:84532", "x402 network in CAIP-2 format")
 	x402Asset := fs.String("x402-asset", "0x036CbD53842c5426634e7929541eC2318f3dCF7e", "x402 payment asset address")
-	x402Amount := fs.String("x402-amount", "10000", "x402 payment amount in token atomic units")
+	_ = fs.String("x402-amount", "10000", "x402 payment amount in token atomic units")
 	x402PricePer1K := fs.Int64("x402-price-per-1k", 0, "dynamic pricing: token atomic units per 1K estimated tokens (0 disables dynamic pricing)")
 	x402MinAmount := fs.Int64("x402-min-amount", 1000, "dynamic pricing: minimum charge per request in token atomic units")
 	x402DefaultOutputTokens := fs.Int64("x402-default-output-tokens", 256, "dynamic pricing: fallback output token estimate when request.max_tokens is absent")
@@ -412,65 +412,13 @@ func runGatewayStart(args []string) {
 	if mode == "" {
 		mode = "off"
 	}
-	if *x402Enable && mode == "off" {
-		// Backward compatibility: old scripts used -x402-enable only.
-		mode = "managed"
-		log.Printf("warning: -x402-enable is deprecated; use -x402-mode=managed")
+	if *x402Enable || mode == "managed" {
+		log.Printf("warning: per-request chat x402 (-x402-enable / -x402-mode=managed) is removed; billing is prepaid API keys + x402 top-up only")
 	}
-	if mode != "off" && mode != "managed" {
-		log.Fatalf("invalid -x402-mode %q (expected off|managed)", *x402Mode)
+	if mode != "" && mode != "off" {
+		log.Printf("warning: ignoring -x402-mode=%q (chat paywall disabled)", *x402Mode)
 	}
-
-	if mode == "managed" {
-		if resolvedX402PayTo == "" {
-			log.Fatalf("x402 managed mode requires -x402-payto")
-		}
-		paywallCfg := &gateway.X402PaywallConfig{
-			FacilitatorURL: strings.TrimSpace(*x402Facilitator),
-			Requirement: x402spike.PaymentRequirements{
-				Scheme:            "exact",
-				Network:           strings.TrimSpace(*x402Network),
-				Amount:            strings.TrimSpace(*x402Amount),
-				Asset:             strings.TrimSpace(*x402Asset),
-				PayTo:             resolvedX402PayTo,
-				MaxTimeoutSeconds: 60,
-				Extra: map[string]any{
-					"name":    strings.TrimSpace(*x402TokenName),
-					"version": strings.TrimSpace(*x402TokenVersion),
-				},
-			},
-		}
-		if len(modelPricingCfg) > 0 {
-			paywallCfg.ModelPricing = make(map[string]gateway.X402TokenPricingConfig, len(modelPricingCfg))
-			for model, mp := range modelPricingCfg {
-				paywallCfg.ModelPricing[model] = gateway.X402TokenPricingConfig{
-					AtomicPer1KTokens:   mp.PricePer1KAtomic,
-					MinAmountAtomic:     mp.MinAmountAtomic,
-					MaxAmountAtomic:     mp.MaxAmountAtomic,
-					DefaultOutputTokens: mp.DefaultOutputTokens,
-				}
-			}
-		}
-		if *x402PricePer1K > 0 {
-			paywallCfg.TokenPricing = &gateway.X402TokenPricingConfig{
-				AtomicPer1KTokens:   *x402PricePer1K,
-				MinAmountAtomic:     *x402MinAmount,
-				DefaultOutputTokens: *x402DefaultOutputTokens,
-			}
-		}
-		proxy.SetX402ChatPaywall(paywallCfg)
-		log.Printf("x402 paywall enabled for /v1/chat/completions network=%s amount=%s asset=%s payto=%s facilitator=%s dynamic_price_per_1k=%d min_amount=%d default_output_tokens=%d",
-			strings.TrimSpace(*x402Network),
-			strings.TrimSpace(*x402Amount),
-			strings.TrimSpace(*x402Asset),
-			resolvedX402PayTo,
-			strings.TrimSpace(*x402Facilitator),
-			*x402PricePer1K,
-			*x402MinAmount,
-			*x402DefaultOutputTokens)
-	} else {
-		log.Printf("x402 gateway paywall mode=off (decentralized routing only)")
-	}
+	log.Printf("gateway chat billing: prepaid API keys on official gateways; x402 only on /v1/prepaid/topup when configured")
 	if *localBackend {
 		log.Printf("gateway local backend fallback enabled (mode=hybrid)")
 	} else {

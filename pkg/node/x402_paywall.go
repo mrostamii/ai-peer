@@ -1,15 +1,9 @@
 package node
 
 import (
-	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"fmt"
-	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/mrostamii/tooti/pkg/apiv1"
 	"github.com/mrostamii/tooti/pkg/config"
@@ -17,9 +11,7 @@ import (
 )
 
 const (
-	inferenceParamPaymentSignature = "payment_signature"
-	inferenceParamResourceURL      = "x402_resource_url"
-	inferenceParamMaxTokens        = "max_tokens"
+	inferenceParamMaxTokens = "max_tokens"
 )
 
 type x402InferencePaywallConfig struct {
@@ -41,16 +33,6 @@ type inferencePaymentSession struct {
 	PriorDebtAtomic int64
 	PrepaidAtomic   int64
 	Pricing         x402PricingConfig
-	PaymentKey      string
-	ResourceURL     string
-	Requirement     x402spike.PaymentRequirements
-	PendingResult   *pendingInferenceResult
-}
-
-type pendingInferenceResult struct {
-	Content    string
-	TokensUsed int64
-	LatencyMs  int64
 }
 
 type x402RemoteErrorEnvelope struct {
@@ -71,33 +53,6 @@ func (e *PaymentRequiredError) Error() string {
 		return "payment required"
 	}
 	return e.Message
-}
-
-func buildInferencePaywallConfig(cfg *config.Config) *x402InferencePaywallConfig {
-	if cfg == nil || !cfg.Node.X402.Enabled {
-		return nil
-	}
-	return &x402InferencePaywallConfig{
-		FacilitatorURL: strings.TrimSpace(cfg.Node.X402.FacilitatorURL),
-		Requirement: x402spike.PaymentRequirements{
-			Scheme:            "exact",
-			Network:           strings.TrimSpace(cfg.Node.X402.Network),
-			Amount:            "1",
-			Asset:             strings.TrimSpace(cfg.Node.X402.Asset),
-			PayTo:             strings.TrimSpace(cfg.Node.X402.PayTo),
-			MaxTimeoutSeconds: 60,
-			Extra: map[string]any{
-				"name":    strings.TrimSpace(cfg.Node.X402.TokenName),
-				"version": strings.TrimSpace(cfg.Node.X402.TokenVersion),
-			},
-		},
-		Pricing: x402PricingConfig{
-			AtomicPer1KTokens:   cfg.Node.X402.PricePer1KAtomic,
-			MinAmountAtomic:     cfg.Node.X402.MinAmountAtomic,
-			DefaultOutputTokens: cfg.Node.X402.DefaultOutputTokens,
-		},
-		ModelPricing: cfg.Models.ModelPricing,
-	}
 }
 
 func buildAdvertisedModelPricing(cfg *config.Config) map[string]ModelPricingHint {
@@ -135,114 +90,6 @@ func buildAdvertisedModelPricing(cfg *config.Config) map[string]ModelPricingHint
 		return nil
 	}
 	return out
-}
-
-func (r *Runtime) enforceInferencePayment(req *apiv1.InferenceRequest) (*inferencePaymentSession, string, bool) {
-	if r == nil || r.inferencePaywall == nil {
-		return nil, "", true
-	}
-	paywall := r.inferencePaywall
-	resourceURL := "http://tooti.local/v1/chat/completions"
-	if req != nil && req.GetParams() != nil {
-		if got := strings.TrimSpace(req.GetParams()[inferenceParamResourceURL]); got != "" {
-			resourceURL = got
-		}
-	}
-	requirement, quotedAmount := computeInferenceRequirementAndAmount(paywall, req)
-	paymentRequired := x402spike.PaymentRequired{
-		X402Version: 2,
-		Error:       "PAYMENT-SIGNATURE header is required",
-		Resource: x402spike.ResourceInfo{
-			URL:         resourceURL,
-			Description: "paid inference request",
-			MimeType:    "application/json",
-		},
-		Accepts:    []x402spike.PaymentRequirements{requirement},
-		Extensions: map[string]any{},
-	}
-
-	paymentHeader := ""
-	if req != nil && req.GetParams() != nil {
-		paymentHeader = strings.TrimSpace(req.GetParams()[inferenceParamPaymentSignature])
-	}
-	if paymentHeader == "" {
-		return nil, encodePaymentRequiredEnvelope("PAYMENT-SIGNATURE header is required", paymentRequired, x402spike.SettlementResponse{}), false
-	}
-
-	var payload x402spike.PaymentPayload
-	if err := x402spike.DecodeBase64JSON(paymentHeader, &payload); err != nil {
-		paymentRequired.Error = "invalid PAYMENT-SIGNATURE header"
-		return nil, encodePaymentRequiredEnvelope(paymentRequired.Error, paymentRequired, x402spike.SettlementResponse{}), false
-	}
-	payer := strings.ToLower(strings.TrimSpace(payload.Payload.Authorization.From))
-	paymentKey := makePaymentKey(req, payer)
-	pending, hasPending := r.getPendingInferenceResult(paymentKey)
-	priorDebt := r.getPaymentDebt(payer)
-	requirementWithDebt := requirement
-	if priorDebt > 0 {
-		requiredAtomic := priorDebt
-		if !hasPending {
-			requiredAtomic += quotedAmount
-		}
-		if requiredAtomic < 1 {
-			requiredAtomic = 1
-		}
-		requirementWithDebt.Amount = strconv.FormatInt(requiredAtomic, 10)
-		paymentRequired.Accepts = []x402spike.PaymentRequirements{requirementWithDebt}
-	}
-	if err := validateAcceptedPayment(payload.Accepted, requirementWithDebt); err != nil {
-		paymentRequired.Error = err.Error()
-		return nil, encodePaymentRequiredEnvelope(paymentRequired.Error, paymentRequired, x402spike.SettlementResponse{}), false
-	}
-	prepaidAtomic, err := strconv.ParseInt(strings.TrimSpace(payload.Accepted.Amount), 10, 64)
-	if err != nil || prepaidAtomic <= 0 {
-		paymentRequired.Error = "invalid PAYMENT-SIGNATURE amount"
-		return nil, encodePaymentRequiredEnvelope(paymentRequired.Error, paymentRequired, x402spike.SettlementResponse{}), false
-	}
-
-	if strings.TrimSpace(paywall.FacilitatorURL) == "" {
-		if hasPending && priorDebt > 0 {
-			r.setPaymentDebt(payer, 0)
-		}
-		return &inferencePaymentSession{
-			Payer:           payer,
-			Model:           strings.TrimSpace(req.GetModel()),
-			PriorDebtAtomic: priorDebt,
-			PrepaidAtomic:   prepaidAtomic,
-			Pricing:         resolveInferencePricing(paywall, req),
-			PaymentKey:      paymentKey,
-			ResourceURL:     resourceURL,
-			Requirement:     requirementWithDebt,
-			PendingResult:   pendingOrNil(pending, hasPending),
-		}, "", true
-	}
-	settle, _, _, err := settleWithFacilitator(paywall.FacilitatorURL, payload, requirementWithDebt)
-	if err != nil {
-		paymentRequired.Error = "facilitator error: " + err.Error()
-		return nil, encodePaymentRequiredEnvelope(paymentRequired.Error, paymentRequired, x402spike.SettlementResponse{}), false
-	}
-	if !settle.Success {
-		if strings.TrimSpace(settle.ErrorReason) != "" {
-			paymentRequired.Error = "payment settlement failed: " + strings.TrimSpace(settle.ErrorReason)
-		} else {
-			paymentRequired.Error = "payment settlement failed"
-		}
-		return nil, encodePaymentRequiredEnvelope(paymentRequired.Error, paymentRequired, settle), false
-	}
-	if hasPending && priorDebt > 0 {
-		r.setPaymentDebt(payer, 0)
-	}
-	return &inferencePaymentSession{
-		Payer:           payer,
-		Model:           strings.TrimSpace(req.GetModel()),
-		PriorDebtAtomic: priorDebt,
-		PrepaidAtomic:   prepaidAtomic,
-		Pricing:         resolveInferencePricing(paywall, req),
-		PaymentKey:      paymentKey,
-		ResourceURL:     resourceURL,
-		Requirement:     requirementWithDebt,
-		PendingResult:   pendingOrNil(pending, hasPending),
-	}, "", true
 }
 
 func computeInferenceRequirement(paywall *x402InferencePaywallConfig, req *apiv1.InferenceRequest) x402spike.PaymentRequirements {
@@ -364,93 +211,6 @@ func decodePaymentRequiredEnvelope(msg string) (*PaymentRequiredError, bool) {
 	}, true
 }
 
-func settleWithFacilitator(
-	facilitatorURL string,
-	payload x402spike.PaymentPayload,
-	req x402spike.PaymentRequirements,
-) (x402spike.SettlementResponse, int64, int64, error) {
-	facilitatorURL = strings.TrimRight(strings.TrimSpace(facilitatorURL), "/")
-	requestBody := x402VerifyRequest{
-		X402Version:         2,
-		PaymentPayload:      payload,
-		PaymentRequirements: req,
-	}
-	verifyStarted := time.Now()
-	var verifyRes x402VerifyResponse
-	if err := postJSON(facilitatorURL+"/verify", requestBody, &verifyRes); err != nil {
-		return x402spike.SettlementResponse{}, time.Since(verifyStarted).Milliseconds(), 0, err
-	}
-	verifyMS := time.Since(verifyStarted).Milliseconds()
-	if !verifyRes.IsValid {
-		return x402spike.SettlementResponse{
-			Success:     false,
-			ErrorReason: verifyRes.InvalidReason,
-			Payer:       verifyRes.Payer,
-			Transaction: "",
-			Network:     req.Network,
-		}, verifyMS, 0, nil
-	}
-	settleStarted := time.Now()
-	var settleRes x402spike.SettlementResponse
-	if err := postJSON(facilitatorURL+"/settle", requestBody, &settleRes); err != nil {
-		return x402spike.SettlementResponse{}, verifyMS, time.Since(settleStarted).Milliseconds(), err
-	}
-	return settleRes, verifyMS, time.Since(settleStarted).Milliseconds(), nil
-}
-
-type x402VerifyRequest struct {
-	X402Version         int                           `json:"x402Version"`
-	PaymentPayload      x402spike.PaymentPayload      `json:"paymentPayload"`
-	PaymentRequirements x402spike.PaymentRequirements `json:"paymentRequirements"`
-}
-
-type x402VerifyResponse struct {
-	IsValid       bool   `json:"isValid"`
-	InvalidReason string `json:"invalidReason,omitempty"`
-	Payer         string `json:"payer,omitempty"`
-}
-
-func postJSON(url string, reqBody any, out any) error {
-	raw, err := json.Marshal(reqBody)
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(raw))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("POST %s returned status %d", url, resp.StatusCode)
-	}
-	return json.NewDecoder(resp.Body).Decode(out)
-}
-
-func validateAcceptedPayment(got, want x402spike.PaymentRequirements) error {
-	if got.Scheme != want.Scheme ||
-		got.Network != want.Network ||
-		got.Amount != want.Amount ||
-		got.Asset != want.Asset ||
-		got.PayTo != want.PayTo {
-		return fmt.Errorf("PAYMENT-SIGNATURE accepted requirement mismatch")
-	}
-	return nil
-}
-
-func pendingOrNil(v pendingInferenceResult, ok bool) *pendingInferenceResult {
-	if !ok {
-		return nil
-	}
-	cp := v
-	return &cp
-}
-
 func (r *Runtime) getPaymentDebt(payer string) int64 {
 	payer = strings.ToLower(strings.TrimSpace(payer))
 	if r == nil || payer == "" {
@@ -476,72 +236,6 @@ func (r *Runtime) setPaymentDebt(payer string, debt int64) {
 		return
 	}
 	r.paymentDebtByPayer[payer] = debt
-}
-
-func (r *Runtime) setPendingInferenceResult(key string, result pendingInferenceResult) {
-	key = strings.TrimSpace(key)
-	if r == nil || key == "" {
-		return
-	}
-	r.pendingPayMu.Lock()
-	defer r.pendingPayMu.Unlock()
-	r.pendingPayByKey[key] = result
-}
-
-func (r *Runtime) getPendingInferenceResult(key string) (pendingInferenceResult, bool) {
-	key = strings.TrimSpace(key)
-	if r == nil || key == "" {
-		return pendingInferenceResult{}, false
-	}
-	r.pendingPayMu.Lock()
-	defer r.pendingPayMu.Unlock()
-	v, ok := r.pendingPayByKey[key]
-	return v, ok
-}
-
-func (r *Runtime) deletePendingInferenceResult(key string) {
-	key = strings.TrimSpace(key)
-	if r == nil || key == "" {
-		return
-	}
-	r.pendingPayMu.Lock()
-	defer r.pendingPayMu.Unlock()
-	delete(r.pendingPayByKey, key)
-}
-
-func makePaymentKey(req *apiv1.InferenceRequest, payer string) string {
-	type keyMsg struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	}
-	type keyReq struct {
-		Payer    string            `json:"payer"`
-		Model    string            `json:"model"`
-		Messages []keyMsg          `json:"messages"`
-		Params   map[string]string `json:"params"`
-	}
-	out := keyReq{
-		Payer:  strings.ToLower(strings.TrimSpace(payer)),
-		Params: map[string]string{},
-	}
-	if req != nil {
-		out.Model = strings.TrimSpace(req.GetModel())
-		for _, m := range req.GetMessages() {
-			out.Messages = append(out.Messages, keyMsg{
-				Role:    m.GetRole(),
-				Content: m.GetContent(),
-			})
-		}
-		for k, v := range req.GetParams() {
-			if strings.EqualFold(strings.TrimSpace(k), inferenceParamPaymentSignature) {
-				continue
-			}
-			out.Params[k] = v
-		}
-	}
-	raw, _ := json.Marshal(out)
-	sum := sha256.Sum256(raw)
-	return hex.EncodeToString(sum[:])
 }
 
 func (r *Runtime) reconcileActualUsage(session *inferencePaymentSession, tokensUsed int64) {
@@ -586,23 +280,4 @@ func (r *Runtime) computeActualDueAtomic(session *inferencePaymentSession, token
 		actualDue = 1
 	}
 	return actualDue
-}
-
-func (r *Runtime) markAbortedStreamDebt(session *inferencePaymentSession) {
-	if r == nil || session == nil || session.Payer == "" {
-		return
-	}
-	penalty := session.Pricing.MinAmountAtomic
-	if penalty < 1 {
-		penalty = 1
-	}
-	current := r.getPaymentDebt(session.Payer)
-	r.setPaymentDebt(session.Payer, current+penalty)
-	logInferenceEvent(map[string]any{
-		"event":           "x402_stream_aborted_debt",
-		"payer":           session.Payer,
-		"model":           session.Model,
-		"penalty_atomic":  penalty,
-		"new_debt_atomic": current + penalty,
-	})
 }
