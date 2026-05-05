@@ -3,7 +3,7 @@
 [![CI](https://img.shields.io/badge/CI-not%20configured-lightgrey)](#)
 [![Go Version](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go)](go.mod)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Discord](https://img.shields.io/badge/Discord-Join%20chat-5865F2?logo=discord&logoColor=white)](https://discord.com/invite/qXXkfu3N)
+[![Discord](https://img.shields.io/badge/Discord-Join%20chat-5865F2?logo=discord&logoColor=white)](https://discord.gg/SHuqWq87GM)
 
 ![tooti banner](assets/banner.jpg)
 
